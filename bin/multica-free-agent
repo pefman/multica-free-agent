@@ -77,6 +77,82 @@ free_models_json() {
   '
 }
 
+runtime_machine_jq() {
+  cat <<'JQ'
+    if (.device_info // "") != "" then
+      (.device_info | split(" · ")[0] | gsub("^\\s+|\\s+$";""))
+    elif ((.name // "") | test("\\(")) then
+      (.name | capture("\\((?<m>[^)]+)\\)") | .m)
+    else
+      "unknown"
+    end
+JQ
+}
+
+list_workspaces() {
+  multica workspace list --output json
+}
+
+list_runtime_groups() {
+  local ws acc='[]' wid json
+  ws=$(list_workspaces)
+  while IFS= read -r wid; do
+    [[ -n "$wid" ]] || continue
+    json=$(multica runtime list --workspace-id "$wid" --output json)
+    acc=$(jq -c --argjson rts "$json" "
+      . + [
+        \$rts[]
+        | select(.status == \"online\")
+        | {provider, machine: ($(runtime_machine_jq))}
+      ]
+    " <<<"$acc")
+  done < <(printf '%s' "$ws" | jq -r '.[].id')
+  jq -c 'unique_by(.provider, .machine) | sort_by(.provider, .machine) | map(. + {label: "\(.provider) @ \(.machine)"})' <<<"$acc"
+}
+
+list_agents() {
+  local ws acc='[]' wid slug agents
+  ws=$(list_workspaces)
+  while IFS=$'\t' read -r wid slug; do
+    [[ -n "$wid" ]] || continue
+    agents=$(multica agent list --workspace-id "$wid" --output json)
+    acc=$(jq -c --argjson ag "$agents" --arg slug "$slug" --arg wid "$wid" '
+      . + [ $ag[] | . + {workspace_slug: $slug, workspace_id: (.workspace_id // $wid)} ]
+    ' <<<"$acc")
+  done < <(printf '%s' "$ws" | jq -r '.[] | [.id, .slug] | @tsv')
+  printf '%s\n' "$acc"
+}
+
+resolve_runtime_id() {
+  local ws_id=$1 provider=$2 machine=$3
+  local json
+  json=$(multica runtime list --workspace-id "$ws_id" --output json)
+  jq -r --arg p "$provider" --arg m "$machine" "
+    [
+      .[]
+      | select(.status == \"online\" and .provider == \$p)
+      | . as \$r
+      | ($(runtime_machine_jq)) as \$machine
+      | select(\$machine == \$m)
+      | .id
+    ] | first // empty
+  " <<<"$json"
+}
+
+map_model_id() {
+  local provider=$1
+  local id=$2
+  local mapped
+  if [[ "$id" == "openrouter/free" ]]; then
+    mapped="openrouter/openrouter/free"
+  elif [[ "$id" == openrouter/* ]]; then
+    mapped=$id
+  else
+    mapped="openrouter/$id"
+  fi
+  printf '%s\n' "$mapped"
+}
+
 if [[ "${MULTICA_FREE_AGENT_LIB:-}" == "1" ]]; then
   return 0 2>/dev/null || exit 0
 fi

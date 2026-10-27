@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Test stub for the multica CLI. Honors --workspace-id and --output json.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+log="${MULTICA_FREE_AGENT_STUB_LOG:-}"
+if [[ -n "$log" ]]; then
+  printf 'multica' >>"$log"
+  for a in "$@"; do printf ' %s' "$a" >>"$log"; done
+  printf '\n' >>"$log"
+fi
+
+ws_id=""
+output="table"
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  case "${args[$i]}" in
+    --workspace-id)
+      i=$((i + 1))
+      ws_id=${args[$i]}
+      ;;
+    --workspace-id=*)
+      ws_id=${args[$i]#--workspace-id=}
+      ;;
+    --output)
+      i=$((i + 1))
+      output=${args[$i]}
+      ;;
+    --output=*)
+      output=${args[$i]#--output=}
+      ;;
+  esac
+  i=$((i + 1))
+done
+
+cmd=${1:-}
+sub=${2:-}
+
+WS_A="aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"
+WS_B="bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb"
+RT_A_ON="11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+RT_A_OFF="11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+RT_B_ON="22222222-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+AG_ONE="33333333-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+AG_TWO="33333333-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+if [[ "$cmd" == "workspace" && "$sub" == "list" ]]; then
+  cat <<EOF
+[
+  {"id":"$WS_A","name":"Workspace A","slug":"ws-a"},
+  {"id":"$WS_B","name":"Workspace B","slug":"ws-b"}
+]
+EOF
+  exit 0
+fi
+
+if [[ "$cmd" == "runtime" && "$sub" == "list" ]]; then
+  if [[ "$ws_id" == "$WS_A" ]]; then
+    cat <<EOF
+[
+  {
+    "id":"$RT_A_ON",
+    "provider":"opencode",
+    "name":"Opencode (omarchy-4090)",
+    "device_info":"omarchy-4090 · 1.0",
+    "status":"online",
+    "runtime_mode":"local",
+    "workspace_id":"$WS_A"
+  },
+  {
+    "id":"$RT_A_OFF",
+    "provider":"opencode",
+    "name":"Opencode (pef-4090)",
+    "device_info":"pef-4090 · 1.0",
+    "status":"offline",
+    "runtime_mode":"local",
+    "workspace_id":"$WS_A"
+  }
+]
+EOF
+    exit 0
+  fi
+  if [[ "$ws_id" == "$WS_B" ]]; then
+    cat <<EOF
+[
+  {
+    "id":"$RT_B_ON",
+    "provider":"opencode",
+    "name":"Opencode (omarchy-4090)",
+    "device_info":"omarchy-4090 · 1.0",
+    "status":"online",
+    "runtime_mode":"local",
+    "workspace_id":"$WS_B"
+  }
+]
+EOF
+    exit 0
+  fi
+  echo "[]"
+  exit 0
+fi
+
+if [[ "$cmd" == "agent" && "$sub" == "list" ]]; then
+  if [[ "$ws_id" == "$WS_A" ]]; then
+    cat <<EOF
+[
+  {
+    "id":"$AG_ONE",
+    "name":"AgentOne",
+    "model":"llama.cpp/qwen",
+    "runtime_id":"$RT_A_ON",
+    "system_key":"mika",
+    "workspace_id":"$WS_A",
+    "status":"idle"
+  },
+  {
+    "id":"$AG_TWO",
+    "name":"AgentTwo",
+    "model":"opencode/deepseek-v4.1-flash-free",
+    "runtime_id":"$RT_A_ON",
+    "system_key":null,
+    "workspace_id":"$WS_A",
+    "status":"idle"
+  }
+]
+EOF
+    exit 0
+  fi
+  echo "[]"
+  exit 0
+fi
+
+if [[ "$cmd" == "agent" && "$sub" == "update" ]]; then
+  echo '{"ok":true}'
+  exit 0
+fi
+
+if [[ "$cmd" == "agent" && "$sub" == "env" ]]; then
+  env_sub=${3:-}
+  agent_id=${4:-}
+  if [[ "$env_sub" == "get" ]]; then
+    cat <<EOF
+{"agent_id":"$agent_id","custom_env":{"FISKMAS_TOKEN":"abc"}}
+EOF
+    exit 0
+  fi
+  if [[ "$env_sub" == "set" ]]; then
+    echo '{"ok":true}'
+    exit 0
+  fi
+fi
+
+echo "stub multica: unhandled: $*" >&2
+exit 1

@@ -103,6 +103,43 @@ MULTICA_FREE_AGENT_LIB=1 source "$LIB"
   printf '%s' "$json" | jq -e 'all(.[]; has("id") and has("name") and has("context_length"))' >/dev/null
 ) && ok "free_models_json keeps free rows and injects openrouter/free" || fail "free_models_json keeps free rows and injects openrouter/free"
 
+# --- Task 2: discovery + model mapping ---
+with_stub() {
+  export PATH="$ROOT/tests/stubs:$PATH"
+  export MULTICA_FREE_AGENT_NONINTERACTIVE=1
+  unset OPENROUTER_API_KEY || true
+  MULTICA_FREE_AGENT_LIB=1 source "$LIB"
+}
+
+(
+  with_stub
+  groups=$(list_runtime_groups)
+  labels=$(printf '%s' "$groups" | jq -r '.[] | "\(.provider) @ \(.machine)"' | sort | tr '\n' '|')
+  [[ "$labels" == "opencode @ omarchy-4090|" ]] || { echo "labels=$labels" >&2; exit 1; }
+  printf '%s' "$groups" | jq -e 'length == 1' >/dev/null
+) && ok "list_runtime_groups keeps only online opencode @ omarchy-4090" || fail "list_runtime_groups keeps only online opencode @ omarchy-4090"
+
+(
+  with_stub
+  got=$(map_model_id opencode nvidia/foo:free)
+  [[ "$got" == "openrouter/nvidia/foo:free" ]] || { echo "got=$got" >&2; exit 1; }
+) && ok "map_model_id prefixes opencode with openrouter/" || fail "map_model_id prefixes opencode with openrouter/"
+
+(
+  with_stub
+  got=$(map_model_id opencode openrouter/free)
+  [[ "$got" == "openrouter/openrouter/free" ]] || { echo "got=$got" >&2; exit 1; }
+) && ok "map_model_id maps openrouter/free for opencode" || fail "map_model_id maps openrouter/free for opencode"
+
+(
+  with_stub
+  got=$(resolve_runtime_id "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa" opencode omarchy-4090)
+  [[ "$got" == "11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ]] || { echo "got=$got" >&2; exit 1; }
+  other=$(resolve_runtime_id "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb" opencode omarchy-4090)
+  [[ "$other" == "22222222-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ]] || { echo "other=$other" >&2; exit 1; }
+  [[ "$got" != "$other" ]] || exit 1
+) && ok "resolve_runtime_id is per-workspace" || fail "resolve_runtime_id is per-workspace"
+
 echo
 echo "$PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
