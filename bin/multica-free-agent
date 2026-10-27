@@ -220,9 +220,118 @@ collect_free_models() {
   '
 }
 
+# --- pretty output helpers: colors only when stdout is a tty, NO_COLOR respected ---
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  BOLD=$'\e[1m'
+  DIM=$'\e[2m'
+  CYAN=$'\e[36m'
+  GREEN=$'\e[32m'
+  YELLOW=$'\e[33m'
+  RED=$'\e[31m'
+  RESET=$'\e[0m'
+else
+  BOLD="" DIM="" CYAN="" GREEN="" YELLOW="" RED="" RESET=""
+fi
+
+humanize_len() {
+  local n=$1
+  [[ "$n" =~ ^[0-9]+$ ]] || return 0
+  if (( n >= 1048576 )); then
+    printf '%dM' $((n / 1048576))
+  elif (( n >= 1024 )); then
+    printf '%dk' $((n / 1024))
+  else
+    printf '%d' "$n"
+  fi
+}
+
+ui_cols() {
+  local cols=${COLUMNS:-}
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=0
+  if (( cols == 0 )) && [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
+    cols=$(tput cols 2>/dev/null) || cols=0
+    [[ "$cols" =~ ^[0-9]+$ ]] || cols=0
+  fi
+  (( cols == 0 )) && cols=80
+  printf '%s' "$cols"
+}
+
+section() {
+  local title=$1 cols bar="" k n
+  cols=$(ui_cols)
+  n=$((cols - ${#title} - 5))
+  (( n < 0 )) && n=0
+  for ((k = 0; k < n; k++)); do bar+="─"; done
+  printf '%s\n' "${BOLD}${CYAN}── ${title} ${RESET}${DIM}${bar}${RESET}"
+}
+
 if [[ "${MULTICA_FREE_AGENT_LIB:-}" == "1" ]]; then
   return 0 2>/dev/null || exit 0
 fi
+
+# --- list commands ---
+
+show_agents_config() {
+  local all_ws sel_ws all_ag in_ws labels
+  all_ws=$(list_workspaces)
+  if [[ ${#workspaces[@]} -gt 0 ]]; then
+    sel_ws=$(filter_workspaces "$all_ws" "${workspaces[@]}")
+  else
+    sel_ws=$all_ws
+  fi
+  [[ "$(printf '%s' "$sel_ws" | jq 'length')" -gt 0 ]] || die "No matching workspaces."
+  all_ag=$(list_agents)
+  in_ws=$(filter_agents "$all_ag" "$sel_ws" "${agentsel[@]}")
+  local n
+  n=$(printf '%s' "$in_ws" | jq 'length')
+  [[ "$n" -gt 0 ]] || die "No matching agents."
+  labels=$(runtime_labels_json)
+
+  local a_name=() a_slug=() a_rt=() a_model=() a_keys=() a_mika=() \
+    aid aslug aname aw_id art amodel amika an \
+    maxn=0 maxs=0 maxrt=0 maxmo=0 ai
+  while IFS=$'\t' read -r aid aslug aname aw_id art amodel amika; do
+    [[ -n "$aid" ]] || continue
+    [[ -n "$amodel" ]] || amodel="-"
+    an=$(multica agent env get "$aid" --workspace-id "$aw_id" --output json 2>/dev/null | \
+      jq -r '(.custom_env // {}) | keys | join(", ")' || true)
+    [[ -n "$an" ]] || an="-"
+    a_slug+=("$aslug"); a_name+=("$aname"); a_rt+=("$art")
+    a_model+=("$amodel"); a_keys+=("$an"); a_mika+=("$amika")
+    (( ${#aname} > maxn )) && maxn=${#aname}
+    (( ${#aslug} > maxs )) && maxs=${#aslug}
+    (( ${#art} > maxrt )) && maxrt=${#art}
+    (( ${#amodel} > maxmo )) && maxmo=${#amodel}
+  done < <(printf '%s' "$in_ws" | jq -r --argjson L "$labels" \
+    '.[] | [.id, .workspace_slug, .name, .workspace_id, ($L[.runtime_id] // "unknown"), (.model // ""), (if .system_key then "[mika]" else "" end)] | @tsv')
+
+  local maxkey k
+  maxkey=0
+  for ai in "${!a_keys[@]}"; do
+    (( ${#a_keys[$ai]} > maxkey )) && maxkey=${#a_keys[$ai]}
+  done
+  # effective column widths include the header labels themselves
+  local ws_w=${maxs} name_w=${maxn} rt_w=${maxrt} mo_w=${maxmo} key_w=${maxkey}
+  (( ws_w < 9 )) && ws_w=9
+  (( name_w < 5 )) && name_w=5
+  (( rt_w < 7 )) && rt_w=7
+  (( mo_w < 5 )) && mo_w=5
+  (( key_w < 8 )) && key_w=8
+  section "Agents (${#a_name[@]})"
+  printf '%s  %-*s  %-*s  %-*s  %-*s  %-*s%s\n' "$BOLD" \
+    "$ws_w" "workspace" "$name_w" "agent" "$rt_w" "runtime" \
+    "$mo_w" "model" "$key_w" "env keys" "$RESET"
+  for ai in "${!a_name[@]}"; do
+    printf '  %-*s  %s%-*s%s  %s%-*s%s  %s%-*s%s  %s%-*s%s  %s\n' \
+      "$ws_w" "${a_slug[$ai]}" \
+      "$BOLD" "$name_w" "${a_name[$ai]}" "$RESET" \
+      "$DIM" "$rt_w" "${a_rt[$ai]}" "$RESET" \
+      "$DIM" "$mo_w" "${a_model[$ai]}" "$RESET" \
+      "$DIM" "$key_w" "${a_keys[$ai]}" "$RESET" \
+      "$( [[ -n "${a_mika[$ai]}" ]] && printf '%s%s%s' "$YELLOW" "${a_mika[$ai]}" "$RESET" )"
+  done
+}
+
 
 die() {
   echo "$*" >&2
@@ -231,14 +340,21 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: multica-free-agent [flags]
+Usage: multica-free-agent [command] [flags]
 
-List free models (OpenCode catalog via `opencode models | grep free`,
-plus OpenRouter if a key is set) and set chosen Multica agents onto a
-local harness plus that model.
+Commands (list or setup):
+  1. setup agents      Run with NO flags: interactively pick a model,
+                       harness, runtime machine, workspaces and agents,
+                       then point them at that model. (default)
+  2. --list-agents     Show every agent's config: workspace, runtime,
+                       model, custom_env key names (values never shown).
+  3. --list-models     Print free models as TSV and exit.
+  4. --list-workspaces Print workspaces (slug, name, id) and exit.
+  5. --list-runtimes   Print online local runtimes and exit.
 
-  (no flags)          Interactive: model, harness, workspaces, agents
-  --list-models       Print free models and exit
+  --list-agents, --list-workspaces and setup accept the filters below.
+
+Flags:
   --dry-run           Print the apply table and exit
   --yes               Apply without a confirm prompt
   --model ID          Model id (opencode/…-free or nvidia/foo:free)
@@ -325,6 +441,7 @@ filter_agents() {
     [.[] | select(. as $a | $qs | any(. == $a.name or . == $a.id))]
   '
 }
+
 
 runtime_label_for() {
   local ws_id=$1 runtime_id=$2
@@ -427,7 +544,7 @@ apply_one() {
 }
 
 main() {
-  local list_models=0 dry_run=0 yes=0
+  local list_models=0 dry_run=0 yes=0 list_agents=0 list_workspaces=0 list_runtimes=0
   local write_env=""
   local model="" runtime="" machine=""
   local workspaces=() agentsel=()
@@ -439,6 +556,9 @@ main() {
         exit 0
         ;;
       --list-models) list_models=1 ;;
+      --list-agents) list_agents=1 ;;
+      --list-workspaces) list_workspaces=1 ;;
+      --list-runtimes) list_runtimes=1 ;;
       --dry-run) dry_run=1 ;;
       --yes) yes=1 ;;
       --env) write_env=1 ;;
@@ -475,6 +595,32 @@ main() {
     shift
   done
 
+  if [[ $list_workspaces -eq 1 ]]; then
+    local ws_all
+    ws_all=$(list_workspaces)
+    section "Workspaces ($(printf '%s' "$ws_all" | jq 'length'))"
+    while IFS=$'\t' read -r wslug wname wid; do
+      [[ -n "$wslug" ]] || continue
+      printf '  %s%s%s  %s%s%s  %s(%s)%s\n' \
+        "$BOLD" "$wslug" "$RESET" "$DIM" "$wname" "$RESET" \
+        "$DIM" "$wid" "$RESET"
+    done < <(printf '%s' "$ws_all" | jq -r '.[] | "\(.slug)\t\(.name)\t\(.id)"')
+    exit 0
+  fi
+
+  if [[ $list_runtimes -eq 1 ]]; then
+    local rgroups
+    rgroups=$(list_runtime_groups)
+    section "Online local runtimes ($(printf '%s' "$rgroups" | jq 'length'))"
+    printf '%s' "$rgroups" | jq -r '.[] | "  " + .label'
+    exit 0
+  fi
+
+  if [[ $list_agents -eq 1 ]]; then
+    show_agents_config
+    exit 0
+  fi
+
   if [[ $list_models -eq 1 ]]; then
     local models
     models=$(collect_free_models)
@@ -498,8 +644,28 @@ main() {
       local n i
       n=$(printf '%s' "$models_json" | jq 'length')
       [[ "$n" -gt 0 ]] || die "No free models. Install opencode or set OPENROUTER_API_KEY."
-      echo "Free models (OpenCode catalog + OpenRouter):"
-      print_models "$models_json" | nl -w2 -s') '
+      section "Free models (${n})"
+      local list_ids=() list_names=() list_ctx=() maxid=0 maxname=0 lid lname lctx
+      while IFS=$'\t' read -r lid lname lctx; do
+        [[ -n "$lid" ]] || continue
+        list_ids+=("$lid"); list_names+=("$lname"); list_ctx+=("$lctx")
+        (( ${#lid} > maxid )) && maxid=${#lid}
+        (( ${#lname} > maxname )) && maxname=${#lname}
+      done < <(print_models "$models_json")
+      # OpenCode-catalog rows carry no display name; only show a name/context
+      # column when some row actually has one.
+      local show_name=0 show_ctx=0 li
+      for li in "${!list_ids[@]}"; do
+        [[ "${list_names[li]}" != "" && "${list_names[li]}" != "${list_ids[li]}" ]] && show_name=1
+        [[ -n "${list_ctx[li]}" ]] && show_ctx=1
+      done
+      (( show_name == 0 )) && maxname=0
+      for li in "${!list_ids[@]}"; do
+        printf '  %2d) %-*s' $((li + 1)) "$maxid" "${list_ids[li]}"
+        (( show_name == 1 )) && printf '  %s%-*s%s' "$DIM" "$maxname" "${list_names[li]}" "$RESET"
+        (( show_ctx == 1 )) && printf '  %s%s%s' "$DIM" "$(humanize_len "${list_ctx[li]}")" "$RESET"
+        printf '\n'
+      done
       i=$(pick_index "$n" "model")
       model=$(printf '%s' "$models_json" | jq -r --argjson i "$i" '.[$i-1].id')
     else
@@ -514,8 +680,16 @@ main() {
       local n i p
       n=$(printf '%s' "$groups" | jq 'length')
       [[ "$n" -gt 0 ]] || die "No online local runtimes."
-      echo "Online local harnesses:"
-      printf '%s' "$groups" | jq -r '.[] | .label' | nl -w2 -s') '
+      section "Online local harnesses (${n})"
+      local glabels=() gl
+      while IFS= read -r gl; do
+        [[ -n "$gl" ]] || continue
+        glabels+=("$gl")
+      done < <(printf '%s' "$groups" | jq -r '.[] | .label')
+      local gi
+      for gi in "${!glabels[@]}"; do
+        printf '  %2d) %s\n' $((gi + 1)) "${glabels[gi]}"
+      done
       i=$(pick_index "$n" "harness")
       runtime=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].provider')
       machine=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].machine')
@@ -533,8 +707,16 @@ main() {
     elif [[ "$count" -eq 1 ]]; then
       machine=$ms
     elif tty_in; then
-      echo "Machines for $runtime:"
-      printf '%s\n' "$ms" | nl -w2 -s') '
+      section "Machines for $runtime (${count})"
+      local mlines=() ml
+      while IFS= read -r ml; do
+        [[ -n "$ml" ]] || continue
+        mlines+=("$ml")
+      done <<<"$ms"
+      local mi
+      for mi in "${!mlines[@]}"; do
+        printf '  %2d) %s\n' $((mi + 1)) "${mlines[mi]}"
+      done
       local i
       i=$(pick_index "$count" "machine")
       machine=$(printf '%s\n' "$ms" | sed -n "${i}p")
@@ -554,8 +736,18 @@ main() {
   if [[ ${#workspaces[@]} -gt 0 ]]; then
     sel_ws=$(filter_workspaces "$all_ws" "${workspaces[@]}")
   elif tty_in && [[ $yes -eq 0 ]]; then
-    echo "Workspaces:"
-    printf '%s' "$all_ws" | jq -r '.[] | "\(.slug)\t\(.name)"' | nl -w2 -s') '
+    section "Workspaces"
+    local wslugs=() wnames=() wslug wname maxwslug=0 wi
+    while IFS=$'\t' read -r wslug wname; do
+      [[ -n "$wslug" ]] || continue
+      wslugs+=("$wslug"); wnames+=("$wname")
+      (( ${#wslug} > maxwslug )) && maxwslug=${#wslug}
+    done < <(printf '%s' "$all_ws" | jq -r '.[] | "\(.slug)\t\(.name)"')
+    for wi in "${!wslugs[@]}"; do
+      printf '  %2d) %s%-*s%s  %s%s%s\n' \
+        $((wi + 1)) "$BOLD" "$maxwslug" "${wslugs[wi]}" "$RESET" \
+        "$DIM" "${wnames[wi]}" "$RESET"
+    done
     local n spec
     n=$(printf '%s' "$all_ws" | jq 'length')
     spec=$(pick_multi "$n" "workspaces")
@@ -572,10 +764,29 @@ main() {
   elif tty_in && [[ $yes -eq 0 ]]; then
     local in_ws n spec
     in_ws=$(filter_agents "$all_ag" "$sel_ws")
-    echo "Agents:"
+    section "Agents"
+    local a_slugs=() a_names=() a_rts=() a_models=() a_mika=() \
+      aslug aname art amodel amika maxaslug=0 maxaname=0 maxart=0 maxamodel=0 ai
     local labels
     labels=$(runtime_labels_json)
-    printf '%s' "$in_ws" | jq -r --argjson L "$labels" '.[] | "\(.workspace_slug)\t\(.name)\t\($L[.runtime_id] // "unknown")\t\(.model // "")\t\(if .system_key then "[mika]" else "" end)"' | nl -w2 -s') '
+    while IFS=$'\t' read -r aslug aname art amodel amika; do
+      [[ -n "$aslug" ]] || continue
+      a_slugs+=("$aslug"); a_names+=("$aname"); a_rts+=("$art")
+      a_models+=("$amodel"); a_mika+=("$amika")
+      (( ${#aslug} > maxaslug )) && maxaslug=${#aslug}
+      (( ${#aname} > maxaname )) && maxaname=${#aname}
+      (( ${#art} > maxart )) && maxart=${#art}
+      (( ${#amodel} > maxamodel )) && maxamodel=${#amodel}
+    done < <(printf '%s' "$in_ws" | jq -r --argjson L "$labels" \
+      '.[] | "\(.workspace_slug)\t\(.name)\t\($L[.runtime_id] // "unknown")\t\(.model // "")\t\(if .system_key then "[mika]" else "" end)"')
+    for ai in "${!a_slugs[@]}"; do
+      printf '  %2d) %-*s  %s%-*s%s  %s%-*s%s  %s%-*s%s  %s\n' \
+        $((ai + 1)) "$maxaslug" "${a_slugs[ai]}" \
+        "$BOLD" "$maxaname" "${a_names[ai]}" "$RESET" \
+        "$DIM" "$maxart" "${a_rts[ai]}" "$RESET" \
+        "$DIM" "$maxamodel" "${a_models[ai]}" "$RESET" \
+        "$( [[ -n "${a_mika[ai]}" ]] && printf '%s%s%s' "$YELLOW" "${a_mika[ai]}" "$RESET" )"
+    done
     n=$(printf '%s' "$in_ws" | jq 'length')
     [[ "$n" -gt 0 ]] || die "No agents in the selected workspaces."
     spec=$(pick_multi "$n" "agents")
@@ -608,10 +819,10 @@ main() {
   local mapped
   mapped=$(map_model_id "$runtime" "$model")
 
-  echo
-  printf '%-16s %-16s %-28s %-36s  ->  %-28s %s\n' "workspace" "agent" "old runtime" "old model" "new runtime" "new model"
+  section "Apply"
   local rows='[]'
   local skipped=0
+  local -a d_kind=() d_slug=() d_agent=() d_ort=() d_omodel=() d_nrt=() d_nmodel=()
   while IFS= read -r row; do
     [[ -n "$row" ]] || continue
     local aid aname ws_id wslug old_model old_rt rid
@@ -623,14 +834,48 @@ main() {
     old_rt=$(runtime_label_for "$ws_id" "$(printf '%s' "$row" | jq -r '.runtime_id // ""')")
     rid=$(resolve_runtime_id "$ws_id" "$runtime" "$machine" || true)
     if [[ -z "$rid" ]]; then
-      printf '%-16s %-16s %-28s %-36s  ->  SKIP (no %s @ %s)\n' "$wslug" "$aname" "$old_rt" "$old_model" "$runtime" "$machine"
+      d_kind+=(S); d_slug+=("$wslug"); d_agent+=("$aname")
+      d_ort+=("$old_rt"); d_omodel+=("$old_model")
+      d_nrt+=("SKIP"); d_nmodel+=("no $runtime @ $machine")
       skipped=$((skipped + 1))
       continue
     fi
-    printf '%-16s %-16s %-28s %-36s  ->  %-28s %s\n' "$wslug" "$aname" "$old_rt" "$old_model" "$runtime @ $machine" "$mapped"
+    d_kind+=(A); d_slug+=("$wslug"); d_agent+=("$aname")
+    d_ort+=("$old_rt"); d_omodel+=("$old_model")
+    d_nrt+=("$runtime @ $machine"); d_nmodel+=("$mapped")
     rows=$(jq -c --arg id "$aid" --arg ws "$ws_id" --arg rid "$rid" --argjson env "$write_env" \
       '. + [{id:$id, workspace_id:$ws, runtime_id:$rid, write_env:$env}]' <<<"$rows")
   done < <(printf '%s' "$sel_ag" | jq -c '.[]')
+
+  local w_slug=0 w_agent=0 w_ort=0 w_omodel=0 w_nrt=0 w_nmodel=0 dj
+  for dj in "${!d_kind[@]}"; do
+    (( ${#d_slug[$dj]} > w_slug )) && w_slug=${#d_slug[$dj]}
+    (( ${#d_agent[$dj]} > w_agent )) && w_agent=${#d_agent[$dj]}
+    (( ${#d_ort[$dj]} > w_ort )) && w_ort=${#d_ort[$dj]}
+    (( ${#d_omodel[$dj]} > w_omodel )) && w_omodel=${#d_omodel[$dj]}
+    (( ${#d_nrt[$dj]} > w_nrt )) && w_nrt=${#d_nrt[$dj]}
+    (( ${#d_nmodel[$dj]} > w_nmodel )) && w_nmodel=${#d_nmodel[$dj]}
+  done
+  printf '%s  %-*s  %-*s  %-*s  %-*s   ->  %-*s  %-*s%s\n' \
+    "$BOLD" "$w_slug" "workspace" "$w_agent" "agent" \
+    "$w_ort" "old runtime" "$w_omodel" "old model" \
+    "$w_nrt" "new runtime" "$w_nmodel" "new model" "$RESET"
+  for dj in "${!d_kind[@]}"; do
+    if [[ "${d_kind[$dj]}" == S ]]; then
+      printf '  %-*s  %-*s  %s%-*s%s  %s%-*s%s  %sSKIP%s: %s\n' \
+        "$w_slug" "${d_slug[$dj]}" "$w_agent" "${d_agent[$dj]}" \
+        "$DIM" "$w_ort" "${d_ort[$dj]}" "$RESET" \
+        "$DIM" "$w_omodel" "${d_omodel[$dj]}" "$RESET" \
+        "$YELLOW" "$RESET" "${d_nmodel[$dj]}"
+    else
+      printf '  %-*s  %-*s  %s%-*s%s  %s%-*s%s  %s->%s  %-*s  %s%s%s\n' \
+        "$w_slug" "${d_slug[$dj]}" "$w_agent" "${d_agent[$dj]}" \
+        "$DIM" "$w_ort" "${d_ort[$dj]}" "$RESET" \
+        "$DIM" "$w_omodel" "${d_omodel[$dj]}" "$RESET" \
+        "$CYAN" "$RESET" "$w_nrt" "${d_nrt[$dj]}" \
+        "$BOLD$CYAN" "${d_nmodel[$dj]}" "$RESET"
+    fi
+  done
 
   local napply
   napply=$(printf '%s' "$rows" | jq 'length')
@@ -661,9 +906,9 @@ main() {
     rid=$(printf '%s' "$row" | jq -r '.runtime_id')
     we=$(printf '%s' "$row" | jq -r '.write_env')
     if apply_one "$aid" "$ws_id" "$rid" "$mapped" "$we" "$key"; then
-      echo "ok $aid"
+      printf '%sok%s %s\n' "$GREEN" "$RESET" "$aid"
     else
-      echo "FAIL $aid" >&2
+      printf '%sFAIL%s %s\n' "$RED" "$RESET" "$aid" >&2
       failed=$((failed + 1))
     fi
   done < <(printf '%s' "$rows" | jq -c '.[]')
@@ -671,7 +916,7 @@ main() {
   if [[ "$failed" -gt 0 ]]; then
     die "$failed agent(s) failed."
   fi
-  echo "Updated $napply agent(s)."
+  printf '%s✔%s Updated %d agent(s).\n' "$GREEN" "$RESET" "$napply"
 }
 
 main "$@"

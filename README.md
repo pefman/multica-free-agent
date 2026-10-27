@@ -1,69 +1,93 @@
 # multica-free-agent
 
-CLI that lists **free models** from the local OpenCode catalog (`opencode models | grep free`) and from OpenRouter (if you have a key), then points chosen [Multica](https://multica.ai) agents at a **local harness** plus that model.
+Point your [Multica](https://multica.ai) agents at a **free LLM** in under a minute.
 
-Multica agents live on **workspaces**, not projects. This tool lists every workspace you belong to and asks which agents to change.
+This CLI lists free models (from the local OpenCode catalog, plus OpenRouter if you have a key), shows which of your Multica agents are online, and re-points any agents you choose onto your local harness + that model. No accounts to configure, no paid tiers — just a free model id your machine can run.
 
-## Install
+```
+── Free models (22) ───────────────────────────────────────────────────────────
+   1) opencode/beam-free
+   2) opencode/deepseek-v4.1-flash-free
+   3) opencode/glm-5.3-flash-free
+   ...
+Choose model [1-22]: 2
 
-Needs `bash`, `curl`, `jq`, a logged-in `multica` CLI with the daemon running, and `opencode` on `PATH` for OpenCode Zen free models.
+── Online local harnesses (3) ─────────
+   1) omp @ omarchy-4090
+   2) opencode @ omarchy-4090
+   ...
+```
+
+## 60-second quick start
+
+You need `bash`, `curl`, `jq`, a running `multica` daemon (with the CLI logged in), and ideally `opencode` on `PATH` (for OpenCode Zen free models).
 
 ```bash
 git clone <this-repo>
+cd multica-free-agent
+
+# optional but recommended: shows every agent's current setup first
+./bin/multica-free-agent --list-agents
+
+# now just run it and answer the prompts
 ./bin/multica-free-agent
 ```
 
-Put `bin/` on your `PATH` if you want the command as `multica-free-agent`.
+The interactive flow asks, in order:
 
-## API key
+1. **Pick a free model** (`opencode/…-free`, OpenRouter `…:free` / zero-priced, and the `openrouter/free` router)
+2. **Pick an online local harness** (`provider @ machine`; `opencode` / `omp` / `pi` / `hermes` listed first)
+3. **Which machines**, if the provider runs on more than one
+4. **Which workspaces** (`a` = all, or comma-separated numbers)
+5. **Which agents** (`a` = all; Mika agents are marked `[mika]`)
+6. **Write `OPENROUTER_API_KEY`** into each agent's `custom_env`? (needed only for OpenRouter models)
+7. **Review** the `old → new` table and confirm
 
-The OpenRouter key is **not** the Multica token.
+**Nothing is changed until you answer `y` at the final `Proceed?` prompt.** Answer `n` (the default) and your agents are untouched.
 
-Resolution order:
+## Inspect without changing anything
 
-1. `OPENROUTER_API_KEY` in the environment
-2. `~/.config/multica-free-agent/api_key` (directory mode `0700`, file mode `0600`)
-3. Interactive prompt, then save to that file
-
-The cached key is only for this CLI (listing models). For daemon-launched runs to call OpenRouter, the script can also merge `OPENROUTER_API_KEY` into each agent's Multica `custom_env`. Existing env keys are preserved (`****` on set). The key is written through a `0600` temp file, never on the process command line.
-
-## Interactive flow
-
-```bash
-./bin/multica-free-agent
-```
-
-1. Load OpenCode free models (`opencode models | grep free`). If that list is empty, prompt for an OpenRouter key.
-2. Pick a free model (OpenCode `opencode/…-free`, OpenRouter `:free` / zero-priced, plus `openrouter/free`)
-3. Pick an **online local** harness, grouped as `provider @ machine` (opencode / omp / pi / hermes listed first)
-4. Select workspaces (`a` = all)
-5. Select agents (`a` = all; Mika is labelled `[mika]`)
-6. Confirm whether to write `OPENROUTER_API_KEY` into each agent's `custom_env`
-7. Review the old → new table, then `Proceed?`
-
-Nothing is written until you confirm.
-
-## Flags
+Every command here is read-only — safe to run anytime:
 
 ```bash
-./bin/multica-free-agent --list-models
+./bin/multica-free-agent --list-agents     # all agents: workspace, runtime, model, env keys, [mika] badge
+./bin/multica-free-agent --list-models     # free models as TSV (id<TAB>name<TAB>context)
+./bin/multica-free-agent --list-workspaces # slug / name / id
+./bin/multica-free-agent --list-runtimes   # online local harnesses
 
+# preview exactly what would change, on real data, without updating:
 ./bin/multica-free-agent --dry-run \
-  --model nvidia/nemotron-3-ultra-550b-a55b:free \
+  --model opencode/deepseek-v4.1-flash-free \
   --runtime opencode \
-  --workspace pelagic-open-waters
+  --workspace fiskmas --workspace nordicmcp-eu
+```
 
+`--list-agents` accepts the same filters as the setup flow, so you can look at one slice:
+
+```bash
+./bin/multica-free-agent --list-agents --workspace fiskmas --agent Mika
+```
+
+## One-shot (non-interactive) recipes
+
+```bash
+# apply to a specific agent without any prompts
 ./bin/multica-free-agent --yes --no-env \
   --model openrouter/free \
   --runtime opencode \
   --machine omarchy-4090 \
   --workspace fiskmas \
   --agent "Oskar (Developer)"
+
+# preview first, then apply: swap --dry-run for --yes
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--list-models` | Print free models and exit |
+| `--list-agents` | Show each agent's config: workspace, runtime, model, `custom_env` key names (values are never printed) |
+| `--list-models` | Print free models (TSV) and exit |
+| `--list-workspaces` | Print workspaces (slug, name, id) and exit |
+| `--list-runtimes` | Print online local runtimes and exit |
 | `--dry-run` | Print the apply table, do not update |
 | `--yes` | Apply without a confirm prompt |
 | `--model ID` | Model id (`opencode/deepseek-v4.1-flash-free` or `nvidia/foo:free`) |
@@ -73,22 +97,39 @@ Nothing is written until you confirm.
 | `--agent NAME_OR_ID` | Repeatable |
 | `--env` / `--no-env` | Merge or skip `OPENROUTER_API_KEY` in `custom_env`. `--yes` defaults to `--env` for OpenRouter ids and `--no-env` for `opencode/…` Zen ids |
 
-`--yes` and `--dry-run` require `--model` and `--runtime` when stdin is not a tty.
+`--yes` and `--dry-run` require `--model` and `--runtime` when stdin is not a tty (e.g. in pipes or scripts).
 
-## Model ids
+## API key (only needed for OpenRouter models)
 
-OpenCode Zen free ids (from `opencode models | grep free`) look like `opencode/deepseek-v4.1-flash-free` and are written unchanged. Prefer `--runtime opencode` for those.
+The OpenRouter key is **not** the Multica token — it's only for listing OpenRouter models and for agents that fetch models from OpenRouter at run time.
 
-OpenRouter ids look like `nvidia/nemotron-3-ultra-550b-a55b:free`. The value written to Multica is harness-prefixed:
+Resolution order:
 
-- `opencode` + `nvidia/foo:free` → `openrouter/nvidia/foo:free`
-- `opencode` + `openrouter/free` → `openrouter/openrouter/free` (Free Models Router)
+1. `OPENROUTER_API_KEY` in the environment
+2. `~/.config/multica-free-agent/api_key` (directory mode `0700`, file mode `0600`)
+3. Interactive prompt, then it's saved to that file for next time
 
-Claude, Codex, Grok, Cursor, and Copilot do not take OpenRouter ids. You can still pick them; Multica will likely reject the model.
+No key at all? You can still use the whole tool — you just get the OpenCode catalog models only (all free, no key needed). When the key *is* set, listing shows real OpenRouter display names and context sizes (e.g. `131k`), and the injected `openrouter/free` router alias appears.
+
+## About model ids
+
+- OpenCode Zen free ids look like `opencode/deepseek-v4.1-flash-free`. They are written unchanged and need **no** OpenRouter key. Prefer `--runtime opencode` for those.
+- OpenRouter ids look like `nvidia/nemotron-3-ultra-550b-a55b:free`. The value written to Multica gets an OpenRouter prefix:
+  - `opencode` + `nvidia/foo:free` → `openrouter/nvidia/foo:free`
+  - `opencode` + `openrouter/free` → `openrouter/openrouter/free` (Free Models Router)
+
+Cloud harnesses (Claude, Codex, Grok, Cursor, Copilot) do not take OpenRouter ids. You can still pick them from the harness menu; Multica will likely reject the model.
+
+## Troubleshooting
+
+- **"No free models. Install opencode or set OPENROUTER_API_KEY."** — Install `opencode` (adds ~20 catalog models with no key needed) or provide a OpenRouter key.
+- **"No online local runtimes."** — Start a local harness (e.g. run `opencode`'s server) and make sure it shows as online in the Multica enjoin CLI.
+- **`--model is required in non-interactive mode`** — Running from a pipe/script: add `--model`, `--runtime`, and (for `--yes`) `--workspace`/`--agent` selectors or `--yes` answers.
+- **"Refusing to apply without --yes on a non-tty."** — Safety break for scripts; add `--yes` (`--env` defaults on) or run interactively.
 
 ## Limits
 
-OpenRouter free-tier traffic is capped (currently 20 requests/min and 50/day until the account has bought credits). A whole squad on one `:free` model will hit that quickly.
+OpenRouter's free tier is rate-capped (currently 20 requests/min and 50/day until the account has bought credits). A whole squad of agents on one `:free` model will hit that quickly — spread agents across models after their initial setup, or stick with OpenCode Zen ids that don't route through OpenRouter.
 
 ## Tests
 
