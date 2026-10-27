@@ -38,11 +38,7 @@ load_api_key() {
     printf '\n'
     return 0
   fi
-  if [[ "${MULTICA_FREE_AGENT_NONINTERACTIVE:-}" == "1" ]]; then
-    echo "No OpenRouter API key. Set OPENROUTER_API_KEY or run interactively to cache one at $(key_path)." >&2
-    return 1
-  fi
-  if [[ ! -e /dev/tty ]]; then
+  if [[ "${MULTICA_FREE_AGENT_NONINTERACTIVE:-}" == "1" ]] || ! { printf '' >/dev/tty; } 2>/dev/null; then
     echo "No OpenRouter API key. Set OPENROUTER_API_KEY or run interactively to cache one at $(key_path)." >&2
     return 1
   fi
@@ -190,7 +186,7 @@ tty_in() {
   if [[ "${MULTICA_FREE_AGENT_NONINTERACTIVE:-}" == "1" ]]; then
     return 1
   fi
-  [[ -e /dev/tty ]]
+  { printf '' >/dev/tty; } 2>/dev/null
 }
 
 prompt_read() {
