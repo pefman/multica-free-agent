@@ -265,9 +265,7 @@ section() {
   printf '%s\n' "${BOLD}${CYAN}── ${title} ${RESET}${DIM}${bar}${RESET}"
 }
 
-if [[ "${MULTICA_FREE_AGENT_LIB:-}" == "1" ]]; then
-  return 0 2>/dev/null || exit 0
-fi
+# --- list commands ---
 
 # --- list commands ---
 
@@ -332,6 +330,159 @@ show_agents_config() {
   done
 }
 
+show_models_tsv() {
+  local models
+  models=$(collect_free_models)
+  [[ "$(printf '%s' "$models" | jq 'length')" -gt 0 ]] || die "No free models. Install opencode or set OPENROUTER_API_KEY."
+  print_models "$models"
+}
+
+show_workspaces() {
+  local ws_all
+  ws_all=$(list_workspaces)
+  section "Workspaces ($(printf '%s' "$ws_all" | jq 'length'))"
+  while IFS=$'\t' read -r wslug wname wid; do
+    [[ -n "$wslug" ]] || continue
+    printf '  %s%s%s  %s%s%s  %s(%s)%s\n' \
+      "$BOLD" "$wslug" "$RESET" "$DIM" "$wname" "$RESET" \
+      "$DIM" "$wid" "$RESET"
+  done < <(printf '%s' "$ws_all" | jq -r '.[] | "\(.slug)\t\(.name)\t\(.id)"')
+}
+
+show_runtimes() {
+  local rgroups
+  rgroups=$(list_runtime_groups)
+  section "Online local runtimes ($(printf '%s' "$rgroups" | jq 'length'))"
+  printf '%s' "$rgroups" | jq -r '.[] | "  " + .label'
+}
+
+# Installs this script into the user's own bin dir so it can be run from
+# anywhere as `multica-free-agent`. Prefers a dir already on PATH.
+install_to_user_bin() {
+  local self dst d
+  self=${BASH_SOURCE[0]}
+  if command -v readlink >/dev/null 2>&1; then
+    self=$(readlink -f "$self" 2>/dev/null) || true
+  fi
+  [[ -n "$self" && -f "$self" ]] || die "Cannot locate this script; install it manually."
+  dst=""
+  for d in "$HOME/.local/bin" "$HOME/bin"; do
+    if [[ -d "$d" && ":$PATH:" == *":$d:"* ]]; then
+      dst=$d
+      break
+    fi
+  done
+  if [[ -z "$dst" ]]; then
+    for d in "$HOME/.local/bin" "$HOME/bin"; do
+      if [[ -e "$d" ]]; then
+        dst=$d
+        break
+      fi
+    done
+  fi
+  [[ -n "$dst" ]] || dst="$HOME/.local/bin"
+  mkdir -p "$dst"
+  if [[ "$self" != "$dst/multica-free-agent" ]]; then
+    cp "$self" "$dst/multica-free-agent"
+    chmod 0755 "$dst/multica-free-agent"
+  fi
+  if [[ ":$PATH:" == *":$dst:"* ]]; then
+    printf '%s✔%s installed at %s — run "multica-free-agent" from anywhere.\n' "$GREEN" "$RESET" "$dst/multica-free-agent"
+  else
+    printf '%s✔%s installed at %s\n' "$GREEN" "$RESET" "$dst/multica-free-agent"
+    printf '%snot on PATH: add with  export PATH="%s:$PATH"%s\n' "$YELLOW" "$dst" "$RESET"
+  fi
+}
+
+# Interactive top menu. Empty input or 1 starts the setup flow.
+# install is always the second-to-last item and exit is always last,
+# regardless of how many list entries are added.
+main_menu() {
+  local -a items=(
+    "configure agents (model → runtime → workspaces → agents)"
+    "review agent configuration"
+    "browse free model catalog"
+    "browse workspace directory"
+    "review online local runtimes"
+    "deploy CLI to user bin (run from any directory)"
+    "exit"
+  )
+  local n=${#items[@]} reply
+  local install_idx=$((n - 1)) exit_idx=$n
+  while true; do
+    section "multica-free-agent"
+    local i
+    for i in "${!items[@]}"; do
+      printf '  %s%2d%s) %s\n' "$BOLD" $((i+1)) "$RESET" "${items[i]}"
+    done
+    reply=$(prompt_read "Choose [1-${n}, Enter=1]: ")
+    case "$reply" in
+      ""|1) return 0 ;;
+      2) show_agents_config ;;
+      3) show_models_tsv ;;
+      4) show_workspaces ;;
+      5) show_runtimes ;;
+      "$install_idx") install_to_user_bin ;;
+      "$exit_idx"|q|exit) exit 0 ;;
+      *) echo "Unknown choice: $reply" >&2 ;;
+    esac
+    prompt_read "Press Enter to continue... " >/dev/null
+  done
+}
+
+# Returns 1 (and prints nothing) when the running copy is behind origin's
+# branch head. 0 on any failure/unknown state so callers stay silent.
+# Skipped entirely with MULTICA_FREE_AGENT_NO_UPDATE_CHECK=1. Results are
+# cached ~24h under the config dir; runs from an installed copy outside a
+# git repo are silently skipped (reinstall via --install to update those).
+update_available() {
+  [[ "${MULTICA_FREE_AGENT_NO_UPDATE_CHECK:-}" == "1" ]] && return 0
+  command -v git >/dev/null 2>&1 || return 0
+  local self repo branch local_sha remote_sha cache ts cached_branch cached_sha now
+  self=${BASH_SOURCE[0]}
+  if command -v readlink >/dev/null 2>&1; then
+    self=$(readlink -f "$self" 2>/dev/null) || true
+  fi
+  [[ -n "$self" && -f "$self" ]] || return 0
+  repo=$(git -C "$(dirname "$self")" rev-parse --show-toplevel 2>/dev/null) || return 0
+  branch=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 0
+  [[ -n "$branch" && "$branch" != "HEAD" ]] || branch=main
+  local_sha=$(git -C "$repo" rev-parse "refs/heads/$branch" 2>/dev/null) || \
+    local_sha=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || return 0
+  cache="$(config_dir)/update_check"
+  now=$(date +%s)
+  if [[ -f "$cache" ]]; then
+    read -r ts cached_branch cached_sha <"$cache" 2>/dev/null || { ts=""; cached_branch=""; cached_sha=""; }
+    if [[ "$ts" =~ ^[0-9]+$ && "$cached_branch" == "$branch" && $(( now - ts )) -lt 86400 ]]; then
+      remote_sha=$cached_sha
+    fi
+  fi
+  if [[ -z "${remote_sha:-}" ]]; then
+    remote_sha=$(GIT_TERMINAL_PROMPT=0 git -C "$repo" ls-remote origin "refs/heads/$branch" 2>/dev/null | awk 'NR==1{print $1}')
+    if [[ "$remote_sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+      mkdir -p "$(config_dir)" 2>/dev/null || true
+      printf '%s %s %s\n' "$now" "$branch" "$remote_sha" >"$cache" 2>/dev/null || true
+    else
+      return 0 # offline, private repo, etc. — stay silent
+    fi
+  fi
+  [[ -z "${local_sha:-}" ]] && return 0
+  if [[ "$local_sha" != "$remote_sha" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+update_warning() {
+  printf '%sⓘ a newer version is on git: please run git pull%s (and reinstall with --install if you use an installed copy)\n' \
+    "$YELLOW" "$RESET"
+}
+
+if [[ "${MULTICA_FREE_AGENT_LIB:-}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+
 
 die() {
   echo "$*" >&2
@@ -342,19 +493,26 @@ usage() {
   cat <<'EOF'
 Usage: multica-free-agent [command] [flags]
 
-Commands (list or setup):
-  1. setup agents      Run with NO flags: interactively pick a model,
-                       harness, runtime machine, workspaces and agents,
-                       then point them at that model. (default)
+Run with NO flags for the interactive menu. Menu choice 1 (or Enter) is
+always setup agents; install is always the second-to-last item and exit
+is always the last item.
+
+Commands:
+  1. setup agents      Interactive pick of model, harness, runtime machine,
+                       workspaces and agents, then apply. (menu default)
   2. --list-agents     Show every agent's config: workspace, runtime,
                        model, custom_env key names (values never shown).
   3. --list-models     Print free models as TSV and exit.
   4. --list-workspaces Print workspaces (slug, name, id) and exit.
   5. --list-runtimes   Print online local runtimes and exit.
+  6. --install         Copy this script into your user bin (prefers a dir
+                       already on PATH: ~/.local/bin, ~/bin) so it can be
+                       run from anywhere as "multica-free-agent".
 
   --list-agents, --list-workspaces and setup accept the filters below.
 
 Flags:
+  --install           Non-interactive install into your user bin
   --dry-run           Print the apply table and exit
   --yes               Apply without a confirm prompt
   --model ID          Model id (opencode/…-free or nvidia/foo:free)
@@ -544,7 +702,7 @@ apply_one() {
 }
 
 main() {
-  local list_models=0 dry_run=0 yes=0 list_agents=0 list_workspaces=0 list_runtimes=0
+  local list_models=0 dry_run=0 yes=0 list_agents=0 list_workspaces=0 list_runtimes=0 do_install=0
   local write_env=""
   local model="" runtime="" machine=""
   local workspaces=() agentsel=()
@@ -556,6 +714,7 @@ main() {
         exit 0
         ;;
       --list-models) list_models=1 ;;
+      --install) do_install=1 ;;
       --list-agents) list_agents=1 ;;
       --list-workspaces) list_workspaces=1 ;;
       --list-runtimes) list_runtimes=1 ;;
@@ -595,24 +754,23 @@ main() {
     shift
   done
 
+  # Small "you're behind origin" hint on interactive runs only.
+  if [[ "${MULTICA_FREE_AGENT_NONINTERACTIVE:-}" != "1" ]]; then
+    update_available || update_warning
+  fi
+
+  if [[ $do_install -eq 1 ]]; then
+    install_to_user_bin
+    exit 0
+  fi
+
   if [[ $list_workspaces -eq 1 ]]; then
-    local ws_all
-    ws_all=$(list_workspaces)
-    section "Workspaces ($(printf '%s' "$ws_all" | jq 'length'))"
-    while IFS=$'\t' read -r wslug wname wid; do
-      [[ -n "$wslug" ]] || continue
-      printf '  %s%s%s  %s%s%s  %s(%s)%s\n' \
-        "$BOLD" "$wslug" "$RESET" "$DIM" "$wname" "$RESET" \
-        "$DIM" "$wid" "$RESET"
-    done < <(printf '%s' "$ws_all" | jq -r '.[] | "\(.slug)\t\(.name)\t\(.id)"')
+    show_workspaces
     exit 0
   fi
 
   if [[ $list_runtimes -eq 1 ]]; then
-    local rgroups
-    rgroups=$(list_runtime_groups)
-    section "Online local runtimes ($(printf '%s' "$rgroups" | jq 'length'))"
-    printf '%s' "$rgroups" | jq -r '.[] | "  " + .label'
+    show_runtimes
     exit 0
   fi
 
@@ -622,11 +780,13 @@ main() {
   fi
 
   if [[ $list_models -eq 1 ]]; then
-    local models
-    models=$(collect_free_models)
-    [[ "$(printf '%s' "$models" | jq 'length')" -gt 0 ]] || die "No free models. Install opencode or set OPENROUTER_API_KEY."
-    print_models "$models"
+    show_models_tsv
     exit 0
+  fi
+
+  # Interactive top menu: setup stays option 1, install second-to-last, exit last.
+  if tty_in && [[ -z "$model" && -z "$runtime" && $dry_run -eq 0 && $yes -eq 0 && $list_models -eq 0 ]]; then
+    main_menu
   fi
 
   if [[ $yes -eq 1 || $dry_run -eq 1 ]]; then

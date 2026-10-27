@@ -35,6 +35,9 @@ cd multica-free-agent
 
 The interactive flow asks, in order:
 
+0. Running with **no flags** opens the numbered menu first:
+   `1) setup agents` (Enter = 1), list commands, then
+   **install to your bin** (always second-to-last) and **exit** (always last).
 1. **Pick a free model** (`opencode/…-free`, OpenRouter `…:free` / zero-priced, and the `openrouter/free` router)
 2. **Pick an online local harness** (`provider @ machine`; `opencode` / `omp` / `pi` / `hermes` listed first)
 3. **Which machines**, if the provider runs on more than one
@@ -80,10 +83,14 @@ Every command here is read-only — safe to run anytime:
   --agent "Oskar (Developer)"
 
 # preview first, then apply: swap --dry-run for --yes
+
+# deploy the CLI into your user bin so it runs from any directory
+./bin/multica-free-agent --install   # copies into ~/.local/bin (or ~/bin)
 ```
 
 | Flag | Meaning |
 |---|---|
+| `--install` | Install the script into your user bin (prefers a dir already on `PATH`: `~/.local/bin`, `~/bin`), so `multica-free-agent` works from anywhere |
 | `--list-agents` | Show each agent's config: workspace, runtime, model, `custom_env` key names (values are never printed) |
 | `--list-models` | Print free models (TSV) and exit |
 | `--list-workspaces` | Print workspaces (slug, name, id) and exit |
@@ -126,6 +133,8 @@ Cloud harnesses (Claude, Codex, Grok, Cursor, Copilot) do not take OpenRouter id
 - **"No online local runtimes."** — Start a local harness (e.g. run `opencode`'s server) and make sure it shows as online in the Multica enjoin CLI.
 - **`--model is required in non-interactive mode`** — Running from a pipe/script: add `--model`, `--runtime`, and (for `--yes`) `--workspace`/`--agent` selectors or `--yes` answers.
 - **"Refusing to apply without --yes on a non-tty."** — Safety break for scripts; add `--yes` (`--env` defaults on) or run interactively.
+- **`multica-free-agent: command not found` after install** — The target bin dir isn't on your `PATH`. Add the line the installer prints, e.g. `export PATH="$HOME/.local/bin:$PATH"`.
+- **"a newer version is on git: please run git pull"** — This repo copy is behind origin. `git pull`, then re-run `--install` if you use an installed copy. Rechecks are cached ~24 h; disable entirely with `MULTICA_FREE_AGENT_NO_UPDATE_CHECK=1`.
 
 ## Limits
 

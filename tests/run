@@ -322,6 +322,80 @@ cli() {
   with_stub
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
+  export HOME="$tmp" XDG_CONFIG_HOME="$tmp/.config"
+  unset OPENROUTER_API_KEY || true
+  if update_available; then
+    echo "expected update: local!=remote" >&2
+    exit 1
+  fi
+  f="$tmp/.config/multica-free-agent/update_check"
+  [[ -f "$f" ]] || { echo "no cache file" >&2; exit 1; }
+  grep -q 'main bbbb' "$f" || { echo "bad cache: $(cat "$f")" >&2; exit 1; }
+) && ok "update_available warns of origin ahead" || fail "update_available warns of origin ahead"
+
+(
+  with_stub
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  export HOME="$tmp" XDG_CONFIG_HOME="$tmp/.config"
+  unset OPENROUTER_API_KEY || true
+  export MULTICA_TEST_LOCAL_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  if ! update_available; then
+    echo "expected up-to-date" >&2
+    exit 1
+  fi
+) && ok "update_available silent when local matches origin" || fail "update_available silent when local matches origin"
+
+(
+  with_stub
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  export HOME="$tmp" XDG_CONFIG_HOME="$tmp/.config"
+  unset OPENROUTER_API_KEY || true
+  log="$tmp/git.log"
+  export MULTICA_TEST_GIT_STUB_LOG="$log"
+  : >"$log"
+  update_available >/dev/null && update_available >/dev/null
+  n_ls=$(grep -c 'ls-remote' "$log" || true)
+  [[ "$n_ls" -eq 1 ]] || { echo "ls-remote calls=$n_ls" >&2; exit 1; }
+) && ok "update_available caches within TTL" || fail "update_available caches within TTL"
+
+(
+  with_stub
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  export HOME="$tmp" XDG_CONFIG_HOME="$tmp/.config"
+  unset OPENROUTER_API_KEY || true
+  export MULTICA_FREE_AGENT_NO_UPDATE_CHECK=1 MULTICA_TEST_GIT_STUB_LOG="$tmp/git.log"
+  : >"$tmp/git.log"
+  update_available
+  [[ ! -s "$tmp/git.log" ]] || { echo "stub used: $(cat "$tmp/git.log")" >&2; exit 1; }
+) && ok "update_available is disabled via NO_UPDATE_CHECK" || fail "update_available is disabled via NO_UPDATE_CHECK"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  out=$(cli "$tmp" "" --install)
+  f="$tmp/.local/bin/multica-free-agent"
+  [[ -x "$f" ]] || { echo "missing/!exec: $f (out=$out)" >&2; exit 1; }
+  grep -q 'main "$@"' "$f" || { echo "copy incomplete" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'not on PATH' || { echo "expected PATH hint: $out" >&2; exit 1; }
+) && ok "--install copies the script into the user bin" || fail "--install copies the script into the user bin"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  # install target dir already on PATH: no PATH hint
+  mkdir -p "$tmp/bin"
+  out=$(PATH="$tmp/bin:$PATH" cli "$tmp" "" --install)
+  binf=$(ls "$tmp"/.local/bin/multica-free-agent "$tmp"/bin/multica-free-agent 2>/dev/null | head -1)
+  [[ -n "$binf" && -x "$binf" ]] || { echo "no installed exec (out=$out)" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'installed' || fail
+) && ok "--install prefers a bin dir already on PATH" || fail "--install prefers a bin dir already on PATH"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
   export PATH="$tmp:/usr/bin:/bin"
   json=$(opencode_free_models_json)
   [[ "$json" == "[]" ]] || { echo "json=$json" >&2; exit 1; }
