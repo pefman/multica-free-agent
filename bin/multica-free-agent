@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# List OpenRouter free models and point Multica agents at a local harness + that model.
+# List free models (OpenCode catalog + OpenRouter) and point Multica agents at a local harness + that model.
 set -euo pipefail
 
 OPENROUTER_MODELS_URL="https://openrouter.ai/api/v1/models"
@@ -162,7 +162,9 @@ map_model_id() {
   local provider=$1
   local id=$2
   local mapped
-  if [[ "$id" == "openrouter/free" ]]; then
+  if [[ "$id" == opencode/* ]]; then
+    mapped=$id
+  elif [[ "$id" == "openrouter/free" ]]; then
     mapped="openrouter/openrouter/free"
   elif [[ "$id" == openrouter/* ]]; then
     mapped=$id
@@ -170,6 +172,52 @@ map_model_id() {
     mapped="openrouter/$id"
   fi
   printf '%s\n' "$mapped"
+}
+
+opencode_free_models_json() {
+  if ! command -v opencode >/dev/null 2>&1; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  local lines
+  lines=$(opencode models 2>/dev/null | grep free || true)
+  if [[ -z "$lines" ]]; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  printf '%s\n' "$lines" | jq -R -s -c '
+    split("\n")
+    | map(select(length > 0))
+    | map({id: ., name: ., context_length: null, source: "opencode"})
+  '
+}
+
+try_openrouter_free_models_json() {
+  local key=""
+  if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+    key=$OPENROUTER_API_KEY
+  elif [[ -f "$(key_path)" ]]; then
+    key=$(tr -d '\r\n' <"$(key_path)")
+  fi
+  if [[ -z "$key" ]]; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  fetch_models_json "$key" | free_models_json || printf '%s\n' '[]'
+}
+
+collect_free_models() {
+  local or oc
+  or=$(try_openrouter_free_models_json)
+  oc=$(opencode_free_models_json)
+  if [[ "$(printf '%s' "$or" | jq 'length')" -eq 0 && "$(printf '%s' "$oc" | jq 'length')" -eq 0 ]]; then
+    if load_api_key >/dev/null; then
+      or=$(try_openrouter_free_models_json)
+    fi
+  fi
+  jq -n -c --argjson or "$or" --argjson oc "$oc" '
+    $or + $oc | unique_by(.id) | sort_by(.name // .id)
+  '
 }
 
 if [[ "${MULTICA_FREE_AGENT_LIB:-}" == "1" ]]; then
@@ -185,14 +233,15 @@ usage() {
   cat <<'EOF'
 Usage: multica-free-agent [flags]
 
-List OpenRouter free models and set chosen Multica agents onto a local
-harness plus that model.
+List free models (OpenCode catalog via `opencode models | grep free`,
+plus OpenRouter if a key is set) and set chosen Multica agents onto a
+local harness plus that model.
 
-  (no flags)          Interactive: key, model, harness, workspaces, agents
+  (no flags)          Interactive: model, harness, workspaces, agents
   --list-models       Print free models and exit
   --dry-run           Print the apply table and exit
   --yes               Apply without a confirm prompt
-  --model ID          OpenRouter model id (e.g. nvidia/foo:free)
+  --model ID          Model id (opencode/…-free or nvidia/foo:free)
   --runtime PROVIDER  Harness provider (opencode, omp, pi, hermes, ...)
   --machine NAME      Machine name (default: the only online one)
   --workspace SLUG    Workspace slug/name/id (repeatable)
@@ -427,9 +476,9 @@ main() {
   done
 
   if [[ $list_models -eq 1 ]]; then
-    local key models
-    key=$(load_api_key)
-    models=$(fetch_models_json "$key" | free_models_json)
+    local models
+    models=$(collect_free_models)
+    [[ "$(printf '%s' "$models" | jq 'length')" -gt 0 ]] || die "No free models. Install opencode or set OPENROUTER_API_KEY."
     print_models "$models"
     exit 0
   fi
@@ -443,23 +492,13 @@ main() {
 
   local models_json=""
   local key=""
-  local need_key=0
   if [[ -z "$model" ]]; then
-    need_key=1
-  fi
-  if [[ $dry_run -eq 0 && ( -z "$write_env" || "$write_env" == "1" ) ]]; then
-    need_key=1
-  fi
-  if [[ $need_key -eq 1 ]]; then
-    key=$(load_api_key)
-  fi
-  if [[ -z "$model" ]]; then
-    models_json=$(fetch_models_json "$key" | free_models_json)
+    models_json=$(collect_free_models)
     if tty_in; then
       local n i
       n=$(printf '%s' "$models_json" | jq 'length')
-      [[ "$n" -gt 0 ]] || die "No free models returned."
-      echo "Free OpenRouter models:"
+      [[ "$n" -gt 0 ]] || die "No free models. Install opencode or set OPENROUTER_API_KEY."
+      echo "Free models (OpenCode catalog + OpenRouter):"
       print_models "$models_json" | nl -w2 -s') '
       i=$(pick_index "$n" "model")
       model=$(printf '%s' "$models_json" | jq -r --argjson i "$i" '.[$i-1].id')
@@ -504,7 +543,9 @@ main() {
     fi
   fi
 
-  if ! is_or_capable "$runtime"; then
+  if [[ "$model" == opencode/* && "$runtime" != "opencode" ]]; then
+    echo "Warning: $model is an OpenCode catalog id; $runtime may reject it. Prefer --runtime opencode." >&2
+  elif [[ "$model" != opencode/* ]] && ! is_or_capable "$runtime"; then
     echo "Warning: $runtime is not known to accept OpenRouter model ids (opencode/omp/pi/hermes). Multica may reject the model." >&2
   fi
 
@@ -546,6 +587,8 @@ main() {
 
   if [[ -z "$write_env" ]]; then
     if [[ $dry_run -eq 1 ]]; then
+      write_env=0
+    elif [[ "$model" == opencode/* ]]; then
       write_env=0
     elif tty_in && [[ $yes -eq 0 ]]; then
       if prompt_yn "Write OPENROUTER_API_KEY into each agent's custom_env? [Y/n] " Y; then

@@ -271,6 +271,134 @@ cli() {
   true
 ) && ok "zero matching machines says none online, not more than one" || fail "zero matching machines says none online, not more than one"
 
+# --- OpenCode free models (`opencode models | grep free`) ---
+(
+  with_stub
+  json=$(opencode_free_models_json)
+  ids=$(printf '%s' "$json" | jq -r '.[].id' | sort | tr '\n' ' ')
+  printf '%s' "$json" | jq -e 'any(.[]; .id == "opencode/deepseek-v4.1-flash-free")' >/dev/null || { echo "ids=$ids" >&2; exit 1; }
+  printf '%s' "$json" | jq -e 'any(.[]; .id == "opencode/beam-free")' >/dev/null || { echo "ids=$ids" >&2; exit 1; }
+  if printf '%s' "$json" | jq -e 'any(.[]; .id == "anthropic/claude-sonnet-5")' >/dev/null; then
+    echo "paid leaked: $ids" >&2
+    exit 1
+  fi
+  if printf '%s' "$json" | jq -e 'any(.[]; .id == "openai/gpt-5.5")' >/dev/null; then
+    echo "paid leaked: $ids" >&2
+    exit 1
+  fi
+) && ok "opencode_free_models_json keeps grep-free ids only" || fail "opencode_free_models_json keeps grep-free ids only"
+
+(
+  with_stub
+  got=$(map_model_id opencode opencode/deepseek-v4.1-flash-free)
+  [[ "$got" == "opencode/deepseek-v4.1-flash-free" ]] || { echo "got=$got" >&2; exit 1; }
+) && ok "map_model_id leaves opencode/ zen ids unchanged" || fail "map_model_id leaves opencode/ zen ids unchanged"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  unset OPENROUTER_API_KEY || true
+  export MULTICA_FREE_AGENT_TEST_NO_KEY=1
+  out=$(cli "$tmp" "" --list-models)
+  printf '%s' "$out" | grep -q 'opencode/deepseek-v4.1-flash-free' || { echo "$out" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'opencode/beam-free' || { echo "$out" >&2; exit 1; }
+) && ok "--list-models includes OpenCode free models without OpenRouter key" || fail "--list-models includes OpenCode free models without OpenRouter key"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  log="$tmp/stub.log"
+  : >"$log"
+  out=$(cli "$tmp" "$log" --dry-run --model opencode/deepseek-v4.1-flash-free --runtime opencode --workspace ws-a --agent AgentOne)
+  printf '%s' "$out" | grep -q 'opencode/deepseek-v4.1-flash-free' || { echo "$out" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'openrouter/opencode/' && { echo "wrong prefix: $out" >&2; exit 1; }
+  if grep -q 'agent update' "$log"; then
+    echo "unexpected update: $(cat "$log")" >&2
+    exit 1
+  fi
+) && ok "--dry-run keeps opencode/ zen model id" || fail "--dry-run keeps opencode/ zen model id"
+
+(
+  with_stub
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  export PATH="$tmp:/usr/bin:/bin"
+  json=$(opencode_free_models_json)
+  [[ "$json" == "[]" ]] || { echo "json=$json" >&2; exit 1; }
+) && ok "opencode_free_models_json is empty when opencode is missing" || fail "opencode_free_models_json is empty when opencode is missing"
+
+(
+  with_stub
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  cat >"$tmp/opencode" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "models" ]]; then
+  printf '%s\n' 'anthropic/claude-sonnet-5' 'openai/gpt-5.5'
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "$tmp/opencode"
+  export PATH="$tmp:$PATH"
+  json=$(opencode_free_models_json)
+  [[ "$json" == "[]" ]] || { echo "json=$json" >&2; exit 1; }
+) && ok "opencode_free_models_json is empty when grep free matches nothing" || fail "opencode_free_models_json is empty when grep free matches nothing"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  log="$tmp/stub.log"
+  : >"$log"
+  unset OPENROUTER_API_KEY || true
+  export MULTICA_FREE_AGENT_TEST_NO_KEY=1
+  cli "$tmp" "$log" --yes --model opencode/deepseek-v4.1-flash-free --runtime opencode --workspace ws-a --agent AgentOne >/dev/null
+  grep -q 'agent update' "$log" || { echo "log=$(cat "$log")" >&2; exit 1; }
+  grep -q 'opencode/deepseek-v4.1-flash-free' "$log" || { echo "log=$(cat "$log")" >&2; exit 1; }
+  grep -q 'openrouter/opencode/' "$log" && { echo "wrong prefix: $(cat "$log")" >&2; exit 1; }
+  if grep -q 'ENVFILE' "$log"; then
+    echo "unexpected env set: $(cat "$log")" >&2
+    exit 1
+  fi
+) && ok "--yes zen model needs no key and skips env" || fail "--yes zen model needs no key and skips env"
+
+path_no_opencode() {
+  local tmpbin=$1
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$ROOT/tests/stubs/curl" >"$tmpbin/curl"
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$ROOT/tests/stubs/multica" >"$tmpbin/multica"
+  chmod +x "$tmpbin/curl" "$tmpbin/multica"
+  PATH="$tmpbin:/usr/bin:/bin"
+}
+
+(
+  tmp=$(mktemp -d)
+  tmpbin=$(mktemp -d)
+  path_no_opencode "$tmpbin"
+  export HOME="$tmp"
+  export XDG_CONFIG_HOME="$tmp/.config"
+  export OPENROUTER_API_KEY="sk-or-test"
+  export MULTICA_FREE_AGENT_NONINTERACTIVE=1
+  export PATH
+  out=$("$ROOT/bin/multica-free-agent" --list-models)
+  printf '%s' "$out" | grep -q 'nvidia/nemotron-3-ultra-550b-a55b:free' || { echo "$out" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'opencode/beam-free' && { echo "opencode leaked: $out" >&2; exit 1; }
+  rm -rf "$tmp" "$tmpbin"
+) && ok "--list-models without opencode still lists OpenRouter free ids" || fail "--list-models without opencode still lists OpenRouter free ids"
+
+(
+  tmp=$(mktemp -d)
+  tmpbin=$(mktemp -d)
+  path_no_opencode "$tmpbin"
+  export HOME="$tmp"
+  export XDG_CONFIG_HOME="$tmp/.config"
+  unset OPENROUTER_API_KEY || true
+  export MULTICA_FREE_AGENT_NONINTERACTIVE=1
+  export PATH
+  err=$("$ROOT/bin/multica-free-agent" --list-models 2>&1) && { echo "expected fail: $err" >&2; exit 1; }
+  printf '%s' "$err" | grep -q 'No OpenRouter API key' || { echo "err=$err" >&2; exit 1; }
+  rm -rf "$tmp" "$tmpbin"
+) && ok "--list-models without opencode or key falls back to load_api_key" || fail "--list-models without opencode or key falls back to load_api_key"
+
 echo
 echo "$PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

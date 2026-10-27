@@ -1,12 +1,12 @@
 # multica-free-agent
 
-CLI that lists **free OpenRouter models** with your API key, then points chosen [Multica](https://multica.ai) agents at a **local harness** plus that model.
+CLI that lists **free models** from the local OpenCode catalog (`opencode models | grep free`) and from OpenRouter (if you have a key), then points chosen [Multica](https://multica.ai) agents at a **local harness** plus that model.
 
 Multica agents live on **workspaces**, not projects. This tool lists every workspace you belong to and asks which agents to change.
 
 ## Install
 
-Needs `bash`, `curl`, `jq`, and a logged-in `multica` CLI with the daemon running.
+Needs `bash`, `curl`, `jq`, a logged-in `multica` CLI with the daemon running, and `opencode` on `PATH` for OpenCode Zen free models.
 
 ```bash
 git clone <this-repo>
@@ -33,8 +33,8 @@ The cached key is only for this CLI (listing models). For daemon-launched runs t
 ./bin/multica-free-agent
 ```
 
-1. Load or prompt for the OpenRouter key
-2. Pick a free model (`:free` suffix or zero prompt/completion/request price, plus `openrouter/free`)
+1. Load OpenCode free models (`opencode models | grep free`). If that list is empty, prompt for an OpenRouter key.
+2. Pick a free model (OpenCode `opencode/…-free`, OpenRouter `:free` / zero-priced, plus `openrouter/free`)
 3. Pick an **online local** harness, grouped as `provider @ machine` (opencode / omp / pi / hermes listed first)
 4. Select workspaces (`a` = all)
 5. Select agents (`a` = all; Mika is labelled `[mika]`)
@@ -66,20 +66,20 @@ Nothing is written until you confirm.
 | `--list-models` | Print free models and exit |
 | `--dry-run` | Print the apply table, do not update |
 | `--yes` | Apply without a confirm prompt |
-| `--model ID` | OpenRouter model id |
+| `--model ID` | Model id (`opencode/deepseek-v4.1-flash-free` or `nvidia/foo:free`) |
 | `--runtime PROVIDER` | `opencode`, `omp`, `pi`, `hermes`, … |
 | `--machine NAME` | Defaults to the only online machine for that provider |
 | `--workspace SLUG` | Repeatable; slug, name, or id |
 | `--agent NAME_OR_ID` | Repeatable |
-| `--env` / `--no-env` | Merge or skip `OPENROUTER_API_KEY` in `custom_env`. `--yes` defaults to `--env` |
+| `--env` / `--no-env` | Merge or skip `OPENROUTER_API_KEY` in `custom_env`. `--yes` defaults to `--env` for OpenRouter ids and `--no-env` for `opencode/…` Zen ids |
 
 `--yes` and `--dry-run` require `--model` and `--runtime` when stdin is not a tty.
 
 ## Model ids
 
-OpenRouter ids look like `nvidia/nemotron-3-ultra-550b-a55b:free`.
+OpenCode Zen free ids (from `opencode models | grep free`) look like `opencode/deepseek-v4.1-flash-free` and are written unchanged. Prefer `--runtime opencode` for those.
 
-The value written to Multica is harness-prefixed:
+OpenRouter ids look like `nvidia/nemotron-3-ultra-550b-a55b:free`. The value written to Multica is harness-prefixed:
 
 - `opencode` + `nvidia/foo:free` → `openrouter/nvidia/foo:free`
 - `opencode` + `openrouter/free` → `openrouter/openrouter/free` (Free Models Router)
@@ -96,4 +96,4 @@ OpenRouter free-tier traffic is capped (currently 20 requests/min and 50/day unt
 bash tests/run
 ```
 
-Uses stub `curl` and `multica` under `tests/stubs/`. Does not touch your live workspaces or your real API key.
+Uses stub `curl`, `multica`, and `opencode` under `tests/stubs/`. Does not touch your live workspaces or your real API key.
