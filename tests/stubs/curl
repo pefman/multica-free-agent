@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Test stub: serve tests/fixtures/models.json for OpenRouter /models.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+log="${MULTICA_FREE_AGENT_STUB_LOG:-}"
+if [[ -n "$log" ]]; then
+  printf 'curl' >>"$log"
+  for a in "$@"; do printf ' %s' "$a" >>"$log"; done
+  printf '\n' >>"$log"
+fi
+url=""
+for a in "$@"; do
+  case "$a" in
+    http*|https*) url=$a ;;
+  esac
+done
+if [[ "$url" == *"/api/v1/models"* ]]; then
+  cat "$ROOT/tests/fixtures/models.json"
+  exit 0
+fi
+echo "stub curl: unhandled url: $url" >&2
+exit 1

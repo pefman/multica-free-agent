@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Stub-PATH tests for bin/multica-free-agent.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PASS=0
+FAIL=0
+
+fail() {
+  echo "FAIL $1" >&2
+  FAIL=$((FAIL + 1))
+}
+
+ok() {
+  echo "ok $1"
+  PASS=$((PASS + 1))
+}
+
+assert_eq() {
+  local name=$1 got=$2 want=$3
+  if [[ "$got" == "$want" ]]; then
+    ok "$name"
+  else
+    fail "$name (got=$(printf %q "$got") want=$(printf %q "$want"))"
+  fi
+}
+
+assert_ok() {
+  local name=$1
+  shift
+  if "$@"; then
+    ok "$name"
+  else
+    fail "$name"
+  fi
+}
+
+LIB="$ROOT/bin/multica-free-agent"
+if [[ ! -f "$LIB" ]]; then
+  echo "FAIL bin/multica-free-agent missing" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+MULTICA_FREE_AGENT_LIB=1 source "$LIB"
+
+# --- load_api_key: missing key, non-interactive ---
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  export HOME="$tmp"
+  export XDG_CONFIG_HOME="$tmp/.config"
+  unset OPENROUTER_API_KEY || true
+  export MULTICA_FREE_AGENT_NONINTERACTIVE=1
+  MULTICA_FREE_AGENT_LIB=1 source "$LIB"
+  if load_api_key >/dev/null 2>&1; then
+    exit 1
+  fi
+  exit 0
+) && ok "load_api_key fails without key in non-interactive" || fail "load_api_key fails without key in non-interactive"
+
+# --- load_api_key: env wins, no file created ---
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  export HOME="$tmp"
+  export XDG_CONFIG_HOME="$tmp/.config"
+  export OPENROUTER_API_KEY="sk-or-test"
+  export MULTICA_FREE_AGENT_NONINTERACTIVE=1
+  MULTICA_FREE_AGENT_LIB=1 source "$LIB"
+  got=$(load_api_key)
+  [[ "$got" == "sk-or-test" ]] || { echo "got=$got" >&2; exit 1; }
+  [[ ! -e "$tmp/.config/multica-free-agent/api_key" ]] || exit 1
+) && ok "load_api_key uses OPENROUTER_API_KEY without creating file" || fail "load_api_key uses OPENROUTER_API_KEY without creating file"
+
+# --- save_api_key permissions ---
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  export HOME="$tmp"
+  export XDG_CONFIG_HOME="$tmp/.config"
+  unset OPENROUTER_API_KEY || true
+  MULTICA_FREE_AGENT_LIB=1 source "$LIB"
+  save_api_key "sk-or-saved"
+  f="$tmp/.config/multica-free-agent/api_key"
+  [[ -f "$f" ]] || exit 1
+  got=$(cat "$f")
+  [[ "$got" == "sk-or-saved" ]] || { echo "got=$got" >&2; exit 1; }
+  dmod=$(stat -c '%a' "$tmp/.config/multica-free-agent")
+  fmod=$(stat -c '%a' "$f")
+  [[ "$dmod" == "700" ]] || { echo "dir mode=$dmod" >&2; exit 1; }
+  [[ "$fmod" == "600" ]] || { echo "file mode=$fmod" >&2; exit 1; }
+) && ok "save_api_key writes 0700 dir and 0600 file" || fail "save_api_key writes 0700 dir and 0600 file"
+
+# --- free_models_json ---
+(
+  MULTICA_FREE_AGENT_LIB=1 source "$LIB"
+  json=$(free_models_json <"$ROOT/tests/fixtures/models.json")
+  ids=$(printf '%s' "$json" | jq -r '.[].id' | sort | tr '\n' ' ')
+  # paid gpt-4o and claude must be gone; :free, zero-priced llama, and injected openrouter/free remain
+  want="meta-llama/llama-3.2-1b-instruct nvidia/nemotron-3-ultra-550b-a55b:free openrouter/free "
+  [[ "$ids" == "$want" ]] || { echo "ids=$ids" >&2; exit 1; }
+  printf '%s' "$json" | jq -e 'all(.[]; has("id") and has("name") and has("context_length"))' >/dev/null
+) && ok "free_models_json keeps free rows and injects openrouter/free" || fail "free_models_json keeps free rows and injects openrouter/free"
+
+echo
+echo "$PASS passed, $FAIL failed"
+[[ "$FAIL" -eq 0 ]]

@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# List OpenRouter free models and point Multica agents at a local harness + that model.
+set -euo pipefail
+
+OPENROUTER_MODELS_URL="https://openrouter.ai/api/v1/models"
+OR_CAPABLE="opencode omp pi hermes"
+
+config_dir() {
+  echo "${XDG_CONFIG_HOME:-$HOME/.config}/multica-free-agent"
+}
+
+key_path() {
+  echo "$(config_dir)/api_key"
+}
+
+save_api_key() {
+  local key=$1
+  local dir
+  dir=$(config_dir)
+  mkdir -p "$dir"
+  chmod 0700 "$dir"
+  local f
+  f=$(key_path)
+  umask 077
+  printf '%s\n' "$key" >"$f"
+  chmod 0600 "$f"
+}
+
+load_api_key() {
+  if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+    printf '%s\n' "$OPENROUTER_API_KEY"
+    return 0
+  fi
+  local f
+  f=$(key_path)
+  if [[ -f "$f" ]]; then
+    tr -d '\r\n' <"$f"
+    printf '\n'
+    return 0
+  fi
+  if [[ "${MULTICA_FREE_AGENT_NONINTERACTIVE:-}" == "1" ]]; then
+    echo "No OpenRouter API key. Set OPENROUTER_API_KEY or run interactively to cache one at $(key_path)." >&2
+    return 1
+  fi
+  if [[ ! -e /dev/tty ]]; then
+    echo "No OpenRouter API key. Set OPENROUTER_API_KEY or run interactively to cache one at $(key_path)." >&2
+    return 1
+  fi
+  local key=""
+  printf 'OpenRouter API key: ' >/dev/tty
+  IFS= read -r key </dev/tty || true
+  if [[ -z "$key" ]]; then
+    echo "Empty key." >&2
+    return 1
+  fi
+  save_api_key "$key"
+  printf '%s\n' "$key"
+}
+
+fetch_models_json() {
+  local key=$1
+  curl -fsS -H "Authorization: Bearer ${key}" "$OPENROUTER_MODELS_URL"
+}
+
+free_models_json() {
+  jq -c '
+    def is_free:
+      ((.id // "") | endswith(":free"))
+      or (
+        ((.pricing.prompt // "1") | tostring) == "0"
+        and ((.pricing.completion // "1") | tostring) == "0"
+        and ((.pricing.request // "0") | tostring) == "0"
+      );
+    [.data[]? | select(is_free) | {id, name, context_length}]
+    | if any(.[]; .id == "openrouter/free") then . else . + [{id:"openrouter/free", name:"OpenRouter Free Models Router", context_length:null}] end
+    | sort_by(.name // .id)
+  '
+}
+
+if [[ "${MULTICA_FREE_AGENT_LIB:-}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+main() {
+  echo "not implemented" >&2
+  exit 1
+}
+
+main "$@"
