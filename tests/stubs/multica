@@ -77,6 +77,16 @@ if [[ "$cmd" == "runtime" && "$sub" == "list" ]]; then
     "workspace_id":"$WS_A"
   },
   {
+    "id":"44444444-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "provider":"opencode",
+    "name":"opencode v1 (omarchy-4090)",
+    "profile_id":"09bcb6ae-7f18-4d6c-8a02-7dc415440868",
+    "device_info":"omarchy-4090 · 1.19.4",
+    "status":"online",
+    "runtime_mode":"local",
+    "workspace_id":"$WS_A"
+  },
+  {
     "id":"11111111-cccc-cccc-cccc-cccccccccccc",
     "provider":"omp",
     "name":"Oh-My-Pi (omarchy-4090)",

@@ -119,6 +119,11 @@ with_stub() {
   [[ "$labels" == *"omp @ omarchy-4090"* ]] || { echo "labels=$labels" >&2; exit 1; }
   [[ "$labels" != *"pef-4090"* ]] || { echo "offline leaked: $labels" >&2; exit 1; }
   [[ "$labels" != *"claude"* ]] || { echo "cloud leaked: $labels" >&2; exit 1; }
+  # two online opencode runtimes share provider @ machine: both must appear,
+  # with the device detail in the label
+  duplabels=$(printf '%s' "$groups" | jq -r '.[].label' | sort | tr '\n' '|')
+  [[ "$duplabels" == *"opencode @ omarchy-4090 (1.19.4)"* ]] || { echo "duplabels=$duplabels" >&2; exit 1; }
+  [[ "$duplabels" == *"opencode @ omarchy-4090 (1.0)"* ]] || { echo "duplabels=$duplabels" >&2; exit 1; }
   first=$(printf '%s' "$groups" | jq -r '.[0].provider')
   [[ "$first" == "omp" || "$first" == "opencode" || "$first" == "pi" || "$first" == "hermes" ]] || { echo "first=$first" >&2; exit 1; }
 ) && ok "list_runtime_groups keeps only online local harnesses, OR-capable first" || fail "list_runtime_groups keeps only online local harnesses, OR-capable first"
@@ -142,7 +147,11 @@ with_stub() {
   other=$(resolve_runtime_id "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb" opencode omarchy-4090)
   [[ "$other" == "22222222-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ]] || { echo "other=$other" >&2; exit 1; }
   [[ "$got" != "$other" ]] || exit 1
-) && ok "resolve_runtime_id is per-workspace" || fail "resolve_runtime_id is per-workspace"
+  v1=$(resolve_runtime_id "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa" opencode omarchy-4090 "omarchy-4090 · 1.19.4")
+  [[ "$v1" == "44444444-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ]] || { echo "v1=$v1" >&2; exit 1; }
+  v2=$(resolve_runtime_id "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa" opencode omarchy-4090 "omarchy-4090 · 1.0")
+  [[ "$v2" == "11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa" ]] || { echo "v2=$v2" >&2; exit 1; }
+) && ok "resolve_runtime_id is per-workspace and disambiguates by device" || fail "resolve_runtime_id is per-workspace and disambiguates by device"
 
 # --- Task 3: CLI ---
 cli() {
@@ -330,7 +339,9 @@ cli() {
   fi
   f="$tmp/.config/multica-free-agent/update_check"
   [[ -f "$f" ]] || { echo "no cache file" >&2; exit 1; }
-  grep -q 'main bbbb' "$f" || { echo "bad cache: $(cat "$f")" >&2; exit 1; }
+  grep -q 'main aaaa' "$f" || { echo "bad cache: $(cat "$f")" >&2; exit 1; }
+  grep -q 'bbbb' "$f" || { echo "bad cache: $(cat "$f")" >&2; exit 1; }
+  [[ "$(wc -w <"$f" | tr -d ' ')" -eq 4 ]] || { echo "not 4 fields: $(cat "$f")" >&2; exit 1; }
 ) && ok "update_available warns of origin ahead" || fail "update_available warns of origin ahead"
 
 (

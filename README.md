@@ -100,6 +100,7 @@ Every command here is read-only — safe to run anytime:
 | `--model ID` | Model id (`opencode/deepseek-v4.1-flash-free` or `nvidia/foo:free`) |
 | `--runtime PROVIDER` | `opencode`, `omp`, `pi`, `hermes`, … |
 | `--machine NAME` | Defaults to the only online machine for that provider |
+| `--device DETAIL` | Pick a specific runtime's `device_info` when several online runtimes share a `provider @ machine` (e.g. OpenCode 1.x vs 2.x on one host) |
 | `--workspace SLUG` | Repeatable; slug, name, or id |
 | `--agent NAME_OR_ID` | Repeatable |
 | `--env` / `--no-env` | Merge or skip `OPENROUTER_API_KEY` in `custom_env`. `--yes` defaults to `--env` for OpenRouter ids and `--no-env` for `opencode/…` Zen ids |

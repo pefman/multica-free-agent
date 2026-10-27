@@ -114,20 +114,31 @@ list_runtime_groups() {
       . + [
         \$rts[]
         | select(.status == \"online\" and ((.runtime_mode // \"local\") == \"local\"))
-        | {provider, machine: ($(runtime_machine_jq))}
+        | {provider, machine: ($(runtime_machine_jq)),
+           device: (.device_info // .name // \"\"),
+           detail: ((.device_info // .name // \"\") | (if (. | contains(\" · \")) then (split(\" · \")[1]) else . end))}
       ]
     " <<<"$acc")
   done < <(printf '%s' "$ws" | jq -r '.[].id')
   jq -c '
-    unique_by(.provider, .machine)
+    unique_by(.provider, .machine, .device)
     | sort_by(
         (if .provider == "opencode" or .provider == "omp" or .provider == "pi" or .provider == "hermes" then 0 else 1 end),
         .provider,
-        .machine
+        .machine,
+        .detail
       )
-    | map(. + {label: "\(.provider) @ \(.machine)"})
+    | . as $rows
+    | ($rows
+       | group_by((.provider + ";" + .machine))
+       | map({(.[0].provider + ";" + .[0].machine): (length > 1)})
+       | add // {}
+      ) as $dup
+    | map(. + {label: "\(.provider) @ \(.machine)"
+               + (if ($dup[(.provider + ";" + .machine)] // false) then " (\(.detail))" else "" end)})
   ' <<<"$acc"
 }
+
 
 list_agents() {
   local ws acc='[]' wid slug agents
@@ -143,16 +154,17 @@ list_agents() {
 }
 
 resolve_runtime_id() {
-  local ws_id=$1 provider=$2 machine=$3
+  local ws_id=$1 provider=$2 machine=$3 device=${4:-}
   local json
   json=$(multica runtime list --workspace-id "$ws_id" --output json)
-  jq -r --arg p "$provider" --arg m "$machine" "
+  jq -r --arg p "$provider" --arg m "$machine" --arg d "$device" "
     [
       .[]
       | select(.status == \"online\" and ((.runtime_mode // \"local\") == \"local\") and .provider == \$p)
       | . as \$r
-      | ($(runtime_machine_jq)) as \$machine
-      | select(\$machine == \$m)
+      | (.device_info // .name // \"\") as \$device
+      | ((\$device | split(\" · \")[0] | gsub(\"^\\\\s+|\\\\s+$\";\"\"))) as \$machine
+      | select(\$machine == \$m and (\$d == \"\" or \$device == \$d))
       | .id
     ] | first // empty
   " <<<"$json"
@@ -452,16 +464,23 @@ update_available() {
   cache="$(config_dir)/update_check"
   now=$(date +%s)
   if [[ -f "$cache" ]]; then
-    read -r ts cached_branch cached_sha <"$cache" 2>/dev/null || { ts=""; cached_branch=""; cached_sha=""; }
+    read -r ts cached_branch cached_local cached_remote <"$cache" 2>/dev/null || {
+      ts=""; cached_branch=""; cached_local=""; cached_remote="";
+    }
     if [[ "$ts" =~ ^[0-9]+$ && "$cached_branch" == "$branch" && $(( now - ts )) -lt 86400 ]]; then
-      remote_sha=$cached_sha
+      if [[ "$cached_local" == "$local_sha" ]]; then
+        # neither side changed since the last check
+        [[ "$cached_remote" == "$local_sha" ]] && return 0
+        [[ "$cached_remote" =~ ^[0-9a-f]{7,40}$ ]] && return 1
+      fi
+      # local HEAD moved since the cache was written: recheck now
     fi
   fi
   if [[ -z "${remote_sha:-}" ]]; then
     remote_sha=$(GIT_TERMINAL_PROMPT=0 git -C "$repo" ls-remote origin "refs/heads/$branch" 2>/dev/null | awk 'NR==1{print $1}')
     if [[ "$remote_sha" =~ ^[0-9a-f]{7,40}$ ]]; then
       mkdir -p "$(config_dir)" 2>/dev/null || true
-      printf '%s %s %s\n' "$now" "$branch" "$remote_sha" >"$cache" 2>/dev/null || true
+      printf '%s %s %s %s\n' "$now" "$branch" "$local_sha" "$remote_sha" >"$cache" 2>/dev/null || true
     else
       return 0 # offline, private repo, etc. — stay silent
     fi
@@ -474,7 +493,7 @@ update_available() {
 }
 
 update_warning() {
-  printf '%sⓘ a newer version is on git: please run git pull%s (and reinstall with --install if you use an installed copy)\n' \
+  printf '%sⓘ this copy differs from origin: please run git pull (or push your local changes)%s\n' \
     "$YELLOW" "$RESET"
 }
 
@@ -518,6 +537,8 @@ Flags:
   --model ID          Model id (opencode/…-free or nvidia/foo:free)
   --runtime PROVIDER  Harness provider (opencode, omp, pi, hermes, ...)
   --machine NAME      Machine name (default: the only online one)
+  --device DETAIL     device_info of the runtime, when several online
+                      runtimes share a provider @ machine (e.g. "1.19.4")
   --workspace SLUG    Workspace slug/name/id (repeatable)
   --agent NAME_OR_ID  Agent name or id (repeatable)
   --env               Merge OPENROUTER_API_KEY into each agent's custom_env
@@ -704,7 +725,7 @@ apply_one() {
 main() {
   local list_models=0 dry_run=0 yes=0 list_agents=0 list_workspaces=0 list_runtimes=0 do_install=0
   local write_env=""
-  local model="" runtime="" machine=""
+  local model="" runtime="" machine="" device=""
   local workspaces=() agentsel=()
 
   while [[ $# -gt 0 ]]; do
@@ -736,6 +757,11 @@ main() {
         shift
         [[ $# -ge 1 ]] || die "--machine needs a value"
         machine=$1
+        ;;
+      --device)
+        shift
+        [[ $# -ge 1 ]] || die "--device needs a value"
+        device=$1
         ;;
       --workspace)
         shift
@@ -853,6 +879,7 @@ main() {
       i=$(pick_index "$n" "harness")
       runtime=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].provider')
       machine=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].machine')
+      device=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].device')
     else
       die "--runtime is required in non-interactive mode"
     fi
@@ -860,7 +887,7 @@ main() {
 
   if [[ -z "$machine" ]]; then
     local ms count
-    ms=$(printf '%s' "$groups" | jq -r --arg p "$runtime" '.[] | select(.provider == $p) | .machine')
+    ms=$(printf '%s' "$groups" | jq -r --arg p "$runtime" '[.[] | select(.provider == $p) | .machine] | unique | .[]')
     count=$(printf '%s\n' "$ms" | grep -c . || true)
     if [[ "$count" -eq 0 ]]; then
       die "No online local $runtime runtime."
@@ -882,6 +909,32 @@ main() {
       machine=$(printf '%s\n' "$ms" | sed -n "${i}p")
     else
       die "--machine is required (more than one online machine for $runtime)"
+    fi
+  fi
+
+  # Multiple online runtimes can share provider @ machine (e.g. OpenCode 1.x
+  # and 2.x); disambiguate by device_info when needed.
+  if [[ -n "$machine" && -z "$device" ]]; then
+    local dlist dcount
+    dlist=$(printf '%s' "$groups" | jq -r --arg p "$runtime" --arg m "$machine" \
+      '[.[] | select(.provider == $p and .machine == $m) | .device] | unique | .[]')
+    dcount=$(printf '%s\n' "$dlist" | grep -c . || true)
+    if [[ "$dcount" -gt 1 ]] && tty_in; then
+      section "Runtimes for $runtime @ $machine (${dcount})"
+      local dlines=() dline di
+      while IFS= read -r dline; do
+        [[ -n "$dline" ]] || continue
+        dlines+=("$dline")
+      done <<<"$dlist"
+      for di in "${!dlines[@]}"; do
+        printf '  %2d) %s\n' $((di + 1)) "${dlines[di]}"
+      done
+      local dpi
+      dpi=$(pick_index "$dcount" "runtime")
+      device=$(printf '%s\n' "$dlist" | sed -n "${dpi}p")
+    else
+      # deterministic default: the first online runtime for provider @ machine
+      device=$(printf '%s\n' "$dlist" | head -1)
     fi
   fi
 
@@ -992,7 +1045,7 @@ main() {
     wslug=$(printf '%s' "$row" | jq -r '.workspace_slug')
     old_model=$(printf '%s' "$row" | jq -r '.model // ""')
     old_rt=$(runtime_label_for "$ws_id" "$(printf '%s' "$row" | jq -r '.runtime_id // ""')")
-    rid=$(resolve_runtime_id "$ws_id" "$runtime" "$machine" || true)
+    rid=$(resolve_runtime_id "$ws_id" "$runtime" "$machine" "$device" || true)
     if [[ -z "$rid" ]]; then
       d_kind+=(S); d_slug+=("$wslug"); d_agent+=("$aname")
       d_ort+=("$old_rt"); d_omodel+=("$old_model")
