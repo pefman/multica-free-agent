@@ -588,6 +588,21 @@ print_models() {
   printf '%s' "$json" | jq -r '.[] | [.id, (.name // ""), ((.context_length // "") | tostring)] | @tsv'
 }
 
+# Try to extract param count from model id (e.g., "gemma-4-26b-a4b" -> "26B", "31b-it" -> "31B")
+extract_params() {
+  local id=$1
+  # Match patterns like: 26b, 31b, 7b, 70b, 1.5b, 8x7b, etc. (POSIX ERE)
+  local params=""
+  # First try NxM pattern (e.g., 8x7b)
+  if printf '%s' "$id" | grep -qE '[0-9]+x[0-9]+[bB]'; then
+    params=$(printf '%s' "$id" | grep -oE '[0-9]+x[0-9]+[bB]' | head -1 | tr '[:lower:]' '[:upper:]')
+  # Then try simple Nb pattern (e.g., 26b, 31b, 1.5b)
+  elif printf '%s' "$id" | grep -qE '[0-9]+(\.[0-9]+)?[bB]'; then
+    params=$(printf '%s' "$id" | grep -oE '[0-9]+(\.[0-9]+)?[bB]' | head -1 | tr '[:lower:]' '[:upper:]')
+  fi
+  printf '%s' "$params"
+}
+
 filter_workspaces() {
   local all=$1
   shift
@@ -831,25 +846,34 @@ main() {
       n=$(printf '%s' "$models_json" | jq 'length')
       [[ "$n" -gt 0 ]] || die "No free models. Install opencode or set OPENROUTER_API_KEY."
       section "Free models (${n})"
-      local list_ids=() list_names=() list_ctx=() maxid=0 maxname=0 lid lname lctx
+      local list_ids=() list_names=() list_ctx=() maxid=0 maxname=0 maxsrc=0 maxparams=0 lid lname lctx
+      local list_src=() list_params=()
       while IFS=$'\t' read -r lid lname lctx; do
         [[ -n "$lid" ]] || continue
+        local src="OpenRouter"
+        [[ "$lid" == opencode/* ]] && src="OpenCode Zen"
+        local params=$(extract_params "$lid")
         list_ids+=("$lid"); list_names+=("$lname"); list_ctx+=("$lctx")
+        list_src+=("$src"); list_params+=("$params")
         (( ${#lid} > maxid )) && maxid=${#lid}
         (( ${#lname} > maxname )) && maxname=${#lname}
+        (( ${#src} > maxsrc )) && maxsrc=${#src}
+        (( ${#params} > maxparams )) && maxparams=${#params}
       done < <(print_models "$models_json")
-      # OpenCode-catalog rows carry no display name; only show a name/context
-      # column when some row actually has one.
-      local show_name=0 show_ctx=0 li
+      # Only show name column if some row has a real display name
+      local show_name=0 show_ctx=0 show_params=0 li
       for li in "${!list_ids[@]}"; do
         [[ "${list_names[li]}" != "" && "${list_names[li]}" != "${list_ids[li]}" ]] && show_name=1
         [[ -n "${list_ctx[li]}" ]] && show_ctx=1
+        [[ -n "${list_params[li]}" ]] && show_params=1
       done
       (( show_name == 0 )) && maxname=0
       for li in "${!list_ids[@]}"; do
         printf '  %2d) %-*s' $((li + 1)) "$maxid" "${list_ids[li]}"
         (( show_name == 1 )) && printf '  %s%-*s%s' "$DIM" "$maxname" "${list_names[li]}" "$RESET"
         (( show_ctx == 1 )) && printf '  %s%s%s' "$DIM" "$(humanize_len "${list_ctx[li]}")" "$RESET"
+        (( show_params == 1 )) && printf '  %s%-*s%s' "$CYAN" "$maxparams" "${list_params[li]}" "$RESET"
+        printf '  %s%-*s%s' "$YELLOW" "$maxsrc" "${list_src[li]}" "$RESET"
         printf '\n'
       done
       i=$(pick_index "$n" "model")
