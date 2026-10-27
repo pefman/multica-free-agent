@@ -157,9 +157,427 @@ if [[ "${MULTICA_FREE_AGENT_LIB:-}" == "1" ]]; then
   return 0 2>/dev/null || exit 0
 fi
 
-main() {
-  echo "not implemented" >&2
+die() {
+  echo "$*" >&2
   exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: multica-free-agent [flags]
+
+List OpenRouter free models and set chosen Multica agents onto a local
+harness plus that model.
+
+  (no flags)          Interactive: key, model, harness, workspaces, agents
+  --list-models       Print free models and exit
+  --dry-run           Print the apply table and exit
+  --yes               Apply without a confirm prompt
+  --model ID          OpenRouter model id (e.g. nvidia/foo:free)
+  --runtime PROVIDER  Harness provider (opencode, omp, pi, hermes, ...)
+  --machine NAME      Machine name (default: the only online one)
+  --workspace SLUG    Workspace slug/name/id (repeatable)
+  --agent NAME_OR_ID  Agent name or id (repeatable)
+  --env               Merge OPENROUTER_API_KEY into each agent's custom_env
+  --no-env            Do not change custom_env
+  -h, --help          Show this help
+
+Key cache: ${XDG_CONFIG_HOME:-$HOME/.config}/multica-free-agent/api_key
+EOF
+}
+
+tty_in() {
+  if [[ "${MULTICA_FREE_AGENT_NONINTERACTIVE:-}" == "1" ]]; then
+    return 1
+  fi
+  [[ -e /dev/tty ]]
+}
+
+prompt_read() {
+  local prompt=$1
+  local reply=""
+  printf '%s' "$prompt" >/dev/tty
+  IFS= read -r reply </dev/tty || true
+  printf '%s\n' "$reply"
+}
+
+prompt_yn() {
+  local prompt=$1
+  local default=$2
+  local reply
+  reply=$(prompt_read "$prompt")
+  if [[ -z "$reply" ]]; then
+    reply=$default
+  fi
+  case "$reply" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_or_capable() {
+  local p=$1
+  [[ " $OR_CAPABLE " == *" $p "* ]]
+}
+
+print_models() {
+  local json=$1
+  printf '%s' "$json" | jq -r '.[] | [.id, (.name // ""), ((.context_length // "") | tostring)] | @tsv'
+}
+
+filter_workspaces() {
+  local all=$1
+  shift
+  if [[ $# -eq 0 ]]; then
+    printf '%s\n' "$all"
+    return 0
+  fi
+  local qjson
+  qjson=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+  printf '%s' "$all" | jq -c --argjson qs "$qjson" '
+    [.[] | select(. as $w | $qs | any(. == $w.slug or . == $w.id or . == $w.name))]
+  '
+}
+
+filter_agents() {
+  local all=$1
+  local wsjson=$2
+  shift 2
+  local wsids
+  wsids=$(printf '%s' "$wsjson" | jq -c '[.[].id]')
+  local filtered
+  filtered=$(printf '%s' "$all" | jq -c --argjson ids "$wsids" '[.[] | select(.workspace_id as $w | $ids | index($w))]')
+  if [[ $# -eq 0 ]]; then
+    printf '%s\n' "$filtered"
+    return 0
+  fi
+  local qjson
+  qjson=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+  printf '%s' "$filtered" | jq -c --argjson qs "$qjson" '
+    [.[] | select(. as $a | $qs | any(. == $a.name or . == $a.id))]
+  '
+}
+
+runtime_label_for() {
+  local ws_id=$1 runtime_id=$2
+  local json
+  json=$(multica runtime list --workspace-id "$ws_id" --output json)
+  printf '%s' "$json" | jq -r --arg id "$runtime_id" "
+    [.[] | select(.id == \$id) | {provider, machine: ($(runtime_machine_jq))}]
+    | first
+    | if . == null then \"unknown\" else \"\(.provider) @ \(.machine)\" end
+  "
+}
+
+pick_index() {
+  local n=$1
+  local label=$2
+  local reply i
+  reply=$(prompt_read "Choose ${label} [1-${n}]: ")
+  [[ "$reply" =~ ^[0-9]+$ ]] || die "Not a number."
+  i=$reply
+  if [[ "$i" -lt 1 || "$i" -gt "$n" ]]; then
+    die "Choice out of range."
+  fi
+  printf '%s\n' "$i"
+}
+
+pick_multi() {
+  local n=$1
+  local label=$2
+  local reply
+  reply=$(prompt_read "Select ${label} (a=all, comma indexes) [a]: ")
+  if [[ -z "$reply" || "$reply" == "a" || "$reply" == "A" ]]; then
+    printf 'a\n'
+    return 0
+  fi
+  printf '%s\n' "$reply"
+}
+
+indexes_to_json() {
+  local arr_json=$1
+  local spec=$2
+  if [[ "$spec" == "a" ]]; then
+    printf '%s\n' "$arr_json"
+    return 0
+  fi
+  local idxs
+  idxs=$(printf '%s' "$spec" | tr ',' '\n' | jq -R . | jq -s '[.[] | select(length>0) | tonumber]')
+  printf '%s' "$arr_json" | jq -c --argjson idxs "$idxs" '[range(length) as $i | select($idxs | index($i+1)) | .[$i]]'
+}
+
+merge_env_file() {
+  local agent_id=$1 ws_id=$2 key=$3 dest=$4
+  local got
+  got=$(multica agent env get "$agent_id" --workspace-id "$ws_id" --output json)
+  printf '%s' "$got" | jq -c --arg k "$key" '
+    ((.custom_env // {}) | to_entries | map({key: .key, value: "****"}) | from_entries)
+    + {OPENROUTER_API_KEY: $k}
+  ' >"$dest"
+  chmod 0600 "$dest"
+}
+
+apply_one() {
+  local agent_id=$1 ws_id=$2 rid=$3 mapped=$4 write_env=$5 key=$6
+  multica agent update "$agent_id" \
+    --workspace-id "$ws_id" \
+    --runtime-id "$rid" \
+    --model "$mapped" \
+    --output json >/dev/null
+  if [[ "$write_env" == "1" ]]; then
+    local tmp
+    tmp=$(mktemp)
+    merge_env_file "$agent_id" "$ws_id" "$key" "$tmp"
+    multica agent env set "$agent_id" \
+      --workspace-id "$ws_id" \
+      --custom-env-file "$tmp" \
+      --output json >/dev/null
+    rm -f "$tmp"
+  fi
+}
+
+main() {
+  local list_models=0 dry_run=0 yes=0
+  local write_env=""
+  local model="" runtime="" machine=""
+  local workspaces=() agentsel=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --list-models) list_models=1 ;;
+      --dry-run) dry_run=1 ;;
+      --yes) yes=1 ;;
+      --env) write_env=1 ;;
+      --no-env) write_env=0 ;;
+      --model)
+        shift
+        [[ $# -ge 1 ]] || die "--model needs a value"
+        model=$1
+        ;;
+      --runtime)
+        shift
+        [[ $# -ge 1 ]] || die "--runtime needs a value"
+        runtime=$1
+        ;;
+      --machine)
+        shift
+        [[ $# -ge 1 ]] || die "--machine needs a value"
+        machine=$1
+        ;;
+      --workspace)
+        shift
+        [[ $# -ge 1 ]] || die "--workspace needs a value"
+        workspaces+=("$1")
+        ;;
+      --agent)
+        shift
+        [[ $# -ge 1 ]] || die "--agent needs a value"
+        agentsel+=("$1")
+        ;;
+      *)
+        die "Unknown flag: $1"
+        ;;
+    esac
+    shift
+  done
+
+  if [[ $list_models -eq 1 ]]; then
+    local key models
+    key=$(load_api_key)
+    models=$(fetch_models_json "$key" | free_models_json)
+    print_models "$models"
+    exit 0
+  fi
+
+  if [[ $yes -eq 1 || $dry_run -eq 1 ]]; then
+    if ! tty_in; then
+      [[ -n "$model" ]] || die "--model is required with --yes/--dry-run"
+      [[ -n "$runtime" ]] || die "--runtime is required with --yes/--dry-run"
+    fi
+  fi
+
+  local models_json=""
+  local key=""
+  if [[ -z "$model" ]] || [[ "${write_env:-1}" == "1" && $dry_run -eq 0 ]]; then
+    key=$(load_api_key) || true
+  fi
+  if [[ -z "$model" ]]; then
+    [[ -n "$key" ]] || key=$(load_api_key)
+    models_json=$(fetch_models_json "$key" | free_models_json)
+    if tty_in; then
+      local n i
+      n=$(printf '%s' "$models_json" | jq 'length')
+      [[ "$n" -gt 0 ]] || die "No free models returned."
+      echo "Free OpenRouter models:"
+      print_models "$models_json" | nl -w2 -s') '
+      i=$(pick_index "$n" "model")
+      model=$(printf '%s' "$models_json" | jq -r --argjson i "$i" '.[$i-1].id')
+    else
+      die "--model is required in non-interactive mode"
+    fi
+  fi
+
+  local groups
+  groups=$(list_runtime_groups)
+  if [[ -z "$runtime" ]]; then
+    if tty_in; then
+      local n i p
+      n=$(printf '%s' "$groups" | jq 'length')
+      [[ "$n" -gt 0 ]] || die "No online local runtimes."
+      echo "Online local harnesses:"
+      printf '%s' "$groups" | jq -r '.[] | .label' | nl -w2 -s') '
+      i=$(pick_index "$n" "harness")
+      runtime=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].provider')
+      machine=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].machine')
+    else
+      die "--runtime is required in non-interactive mode"
+    fi
+  fi
+
+  if [[ -z "$machine" ]]; then
+    local ms count
+    ms=$(printf '%s' "$groups" | jq -r --arg p "$runtime" '.[] | select(.provider == $p) | .machine')
+    count=$(printf '%s\n' "$ms" | grep -c . || true)
+    if [[ "$count" -eq 1 ]]; then
+      machine=$ms
+    elif tty_in && [[ "$count" -gt 1 ]]; then
+      echo "Machines for $runtime:"
+      printf '%s\n' "$ms" | nl -w2 -s') '
+      local i
+      i=$(pick_index "$count" "machine")
+      machine=$(printf '%s\n' "$ms" | sed -n "${i}p")
+    else
+      die "--machine is required (more than one online machine for $runtime)"
+    fi
+  fi
+
+  if ! is_or_capable "$runtime"; then
+    echo "Warning: $runtime is not known to accept OpenRouter model ids (opencode/omp/pi/hermes). Multica may reject the model." >&2
+  fi
+
+  local all_ws sel_ws
+  all_ws=$(list_workspaces)
+  if [[ ${#workspaces[@]} -gt 0 ]]; then
+    sel_ws=$(filter_workspaces "$all_ws" "${workspaces[@]}")
+  elif tty_in && [[ $yes -eq 0 ]]; then
+    echo "Workspaces:"
+    printf '%s' "$all_ws" | jq -r '.[] | "\(.slug)\t\(.name)"' | nl -w2 -s') '
+    local n spec
+    n=$(printf '%s' "$all_ws" | jq 'length')
+    spec=$(pick_multi "$n" "workspaces")
+    sel_ws=$(indexes_to_json "$all_ws" "$spec")
+  else
+    sel_ws=$all_ws
+  fi
+  [[ "$(printf '%s' "$sel_ws" | jq 'length')" -gt 0 ]] || die "No matching workspaces."
+
+  local all_ag sel_ag
+  all_ag=$(list_agents)
+  if [[ ${#agentsel[@]} -gt 0 ]]; then
+    sel_ag=$(filter_agents "$all_ag" "$sel_ws" "${agentsel[@]}")
+  elif tty_in && [[ $yes -eq 0 ]]; then
+    local in_ws n spec
+    in_ws=$(filter_agents "$all_ag" "$sel_ws")
+    echo "Agents:"
+    printf '%s' "$in_ws" | jq -r '.[] | "\(.workspace_slug)\t\(.name)\t\(.model // "")\t\(if .system_key then "[mika]" else "" end)"' | nl -w2 -s') '
+    n=$(printf '%s' "$in_ws" | jq 'length')
+    [[ "$n" -gt 0 ]] || die "No agents in the selected workspaces."
+    spec=$(pick_multi "$n" "agents")
+    sel_ag=$(indexes_to_json "$in_ws" "$spec")
+  else
+    sel_ag=$(filter_agents "$all_ag" "$sel_ws")
+  fi
+  [[ "$(printf '%s' "$sel_ag" | jq 'length')" -gt 0 ]] || die "No matching agents."
+
+  if [[ -z "$write_env" ]]; then
+    if [[ $dry_run -eq 1 ]]; then
+      write_env=0
+    elif tty_in && [[ $yes -eq 0 ]]; then
+      if prompt_yn "Write OPENROUTER_API_KEY into each agent's custom_env? [Y/n] " Y; then
+        write_env=1
+      else
+        write_env=0
+      fi
+    else
+      write_env=1
+    fi
+  fi
+
+  if [[ "$write_env" == "1" && $dry_run -eq 0 ]]; then
+    [[ -n "$key" ]] || key=$(load_api_key)
+  fi
+
+  local mapped
+  mapped=$(map_model_id "$runtime" "$model")
+
+  echo
+  printf '%-16s %-16s %-28s %-36s  ->  %-28s %s\n' "workspace" "agent" "old runtime" "old model" "new runtime" "new model"
+  local rows='[]'
+  local skipped=0
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    local aid aname ws_id wslug old_model old_rt rid
+    aid=$(printf '%s' "$row" | jq -r '.id')
+    aname=$(printf '%s' "$row" | jq -r '.name')
+    ws_id=$(printf '%s' "$row" | jq -r '.workspace_id')
+    wslug=$(printf '%s' "$row" | jq -r '.workspace_slug')
+    old_model=$(printf '%s' "$row" | jq -r '.model // ""')
+    old_rt=$(runtime_label_for "$ws_id" "$(printf '%s' "$row" | jq -r '.runtime_id // ""')")
+    rid=$(resolve_runtime_id "$ws_id" "$runtime" "$machine" || true)
+    if [[ -z "$rid" ]]; then
+      printf '%-16s %-16s %-28s %-36s  ->  SKIP (no %s @ %s)\n' "$wslug" "$aname" "$old_rt" "$old_model" "$runtime" "$machine"
+      skipped=$((skipped + 1))
+      continue
+    fi
+    printf '%-16s %-16s %-28s %-36s  ->  %-28s %s\n' "$wslug" "$aname" "$old_rt" "$old_model" "$runtime @ $machine" "$mapped"
+    rows=$(jq -c --arg id "$aid" --arg ws "$ws_id" --arg rid "$rid" --argjson env "$write_env" \
+      '. + [{id:$id, workspace_id:$ws, runtime_id:$rid, write_env:$env}]' <<<"$rows")
+  done < <(printf '%s' "$sel_ag" | jq -c '.[]')
+
+  local napply
+  napply=$(printf '%s' "$rows" | jq 'length')
+  if [[ "$napply" -eq 0 ]]; then
+    die "Nothing to apply ($skipped skipped)."
+  fi
+
+  if [[ $dry_run -eq 1 ]]; then
+    echo
+    echo "Dry run. $napply agent(s) would be updated ($skipped skipped). env=$write_env"
+    exit 0
+  fi
+
+  if [[ $yes -eq 0 ]]; then
+    if tty_in; then
+      prompt_yn "Proceed? [y/N] " N || die "Aborted."
+    else
+      die "Refusing to apply without --yes on a non-tty."
+    fi
+  fi
+
+  local failed=0
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    local aid ws_id rid we
+    aid=$(printf '%s' "$row" | jq -r '.id')
+    ws_id=$(printf '%s' "$row" | jq -r '.workspace_id')
+    rid=$(printf '%s' "$row" | jq -r '.runtime_id')
+    we=$(printf '%s' "$row" | jq -r '.write_env')
+    if apply_one "$aid" "$ws_id" "$rid" "$mapped" "$we" "$key"; then
+      echo "ok $aid"
+    else
+      echo "FAIL $aid" >&2
+      failed=$((failed + 1))
+    fi
+  done < <(printf '%s' "$rows" | jq -c '.[]')
+
+  if [[ "$failed" -gt 0 ]]; then
+    die "$failed agent(s) failed."
+  fi
+  echo "Updated $napply agent(s)."
 }
 
 main "$@"

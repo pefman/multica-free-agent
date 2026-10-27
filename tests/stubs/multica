@@ -145,6 +145,18 @@ EOF
     exit 0
   fi
   if [[ "$env_sub" == "set" ]]; then
+    file=""
+    j=0
+    while [[ $j -lt ${#args[@]} ]]; do
+      if [[ "${args[$j]}" == "--custom-env-file" ]]; then
+        j=$((j + 1))
+        file=${args[$j]}
+      fi
+      j=$((j + 1))
+    done
+    if [[ -n "$log" && -n "$file" && -f "$file" ]]; then
+      printf 'ENVFILE %s\n' "$(tr -d '\n' <"$file")" >>"$log"
+    fi
     echo '{"ok":true}'
     exit 0
   fi

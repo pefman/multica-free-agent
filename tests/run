@@ -140,6 +140,72 @@ with_stub() {
   [[ "$got" != "$other" ]] || exit 1
 ) && ok "resolve_runtime_id is per-workspace" || fail "resolve_runtime_id is per-workspace"
 
+# --- Task 3: CLI ---
+cli() {
+  export PATH="$ROOT/tests/stubs:$PATH"
+  export HOME="$1"
+  export XDG_CONFIG_HOME="$1/.config"
+  export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-sk-or-test}"
+  export MULTICA_FREE_AGENT_NONINTERACTIVE=1
+  export MULTICA_FREE_AGENT_STUB_LOG="${2:-}"
+  shift 2
+  "$ROOT/bin/multica-free-agent" "$@"
+}
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  out=$(cli "$tmp" "" --list-models)
+  printf '%s' "$out" | grep -q 'nvidia/nemotron-3-ultra-550b-a55b:free' || { echo "$out" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'openrouter/free' || { echo "$out" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'openai/gpt-4o' && exit 1
+  true
+) && ok "--list-models prints free ids" || fail "--list-models prints free ids"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  log="$tmp/stub.log"
+  : >"$log"
+  out=$(cli "$tmp" "$log" --dry-run --model nvidia/foo:free --runtime opencode --workspace ws-a --agent AgentOne)
+  printf '%s' "$out" | grep -q 'openrouter/nvidia/foo:free' || { echo "$out" >&2; exit 1; }
+  if grep -q 'agent update' "$log"; then
+    echo "unexpected update: $(cat "$log")" >&2
+    exit 1
+  fi
+) && ok "--dry-run prints mapped model and does not update" || fail "--dry-run prints mapped model and does not update"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  log="$tmp/stub.log"
+  : >"$log"
+  cli "$tmp" "$log" --yes --no-env --model nvidia/foo:free --runtime opencode --workspace ws-a --agent AgentOne >/dev/null
+  grep -q 'agent update' "$log" || { echo "log=$(cat "$log")" >&2; exit 1; }
+  grep -q '11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa' "$log" || { echo "log=$(cat "$log")" >&2; exit 1; }
+  grep -q 'openrouter/nvidia/foo:free' "$log" || { echo "log=$(cat "$log")" >&2; exit 1; }
+) && ok "--yes updates agent with workspace runtime id and mapped model" || fail "--yes updates agent with workspace runtime id and mapped model"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  log="$tmp/stub.log"
+  : >"$log"
+  cli "$tmp" "$log" --yes --env --model nvidia/foo:free --runtime opencode --workspace ws-a --agent AgentOne >/dev/null
+  grep -q 'ENVFILE' "$log" || { echo "log=$(cat "$log")" >&2; exit 1; }
+  line=$(grep '^ENVFILE' "$log")
+  printf '%s' "$line" | grep -q '"FISKMAS_TOKEN":"****"' || { echo "line=$line" >&2; exit 1; }
+  printf '%s' "$line" | grep -q '"OPENROUTER_API_KEY":"sk-or-test"' || { echo "line=$line" >&2; exit 1; }
+) && ok "--yes --env merges OPENROUTER_API_KEY and preserves other keys as ****" || fail "--yes --env merges OPENROUTER_API_KEY and preserves other keys as ****"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  if cli "$tmp" "" --yes --runtime opencode >/dev/null 2>&1; then
+    exit 1
+  fi
+) && ok "--yes without --model fails on non-tty" || fail "--yes without --model fails on non-tty"
+
 echo
 echo "$PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
