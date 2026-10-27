@@ -114,10 +114,14 @@ with_stub() {
 (
   with_stub
   groups=$(list_runtime_groups)
-  labels=$(printf '%s' "$groups" | jq -r '.[] | "\(.provider) @ \(.machine)"' | sort | tr '\n' '|')
-  [[ "$labels" == "opencode @ omarchy-4090|" ]] || { echo "labels=$labels" >&2; exit 1; }
-  printf '%s' "$groups" | jq -e 'length == 1' >/dev/null
-) && ok "list_runtime_groups keeps only online opencode @ omarchy-4090" || fail "list_runtime_groups keeps only online opencode @ omarchy-4090"
+  labels=$(printf '%s' "$groups" | jq -r '.[] | "\(.provider) @ \(.machine)"' | tr '\n' '|')
+  [[ "$labels" == *"opencode @ omarchy-4090"* ]] || { echo "labels=$labels" >&2; exit 1; }
+  [[ "$labels" == *"omp @ omarchy-4090"* ]] || { echo "labels=$labels" >&2; exit 1; }
+  [[ "$labels" != *"pef-4090"* ]] || { echo "offline leaked: $labels" >&2; exit 1; }
+  [[ "$labels" != *"claude"* ]] || { echo "cloud leaked: $labels" >&2; exit 1; }
+  first=$(printf '%s' "$groups" | jq -r '.[0].provider')
+  [[ "$first" == "omp" || "$first" == "opencode" || "$first" == "pi" || "$first" == "hermes" ]] || { echo "first=$first" >&2; exit 1; }
+) && ok "list_runtime_groups keeps only online local harnesses, OR-capable first" || fail "list_runtime_groups keeps only online local harnesses, OR-capable first"
 
 (
   with_stub
@@ -145,7 +149,9 @@ cli() {
   export PATH="$ROOT/tests/stubs:$PATH"
   export HOME="$1"
   export XDG_CONFIG_HOME="$1/.config"
-  export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-sk-or-test}"
+  if [[ -z "${MULTICA_FREE_AGENT_TEST_NO_KEY:-}" && -z "${OPENROUTER_API_KEY+isset}" ]]; then
+    export OPENROUTER_API_KEY="sk-or-test"
+  fi
   export MULTICA_FREE_AGENT_NONINTERACTIVE=1
   export MULTICA_FREE_AGENT_STUB_LOG="${2:-}"
   shift 2
@@ -205,6 +211,65 @@ cli() {
     exit 1
   fi
 ) && ok "--yes without --model fails on non-tty" || fail "--yes without --model fails on non-tty"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/.config/multica-free-agent"
+  : >"$tmp/.config/multica-free-agent/api_key"
+  chmod 600 "$tmp/.config/multica-free-agent/api_key"
+  log="$tmp/stub.log"
+  : >"$log"
+  unset OPENROUTER_API_KEY || true
+  export MULTICA_FREE_AGENT_TEST_NO_KEY=1
+  if cli "$tmp" "$log" --yes --env --model nvidia/foo:free --runtime opencode --workspace ws-a --agent AgentOne >/dev/null 2>&1; then
+    echo "empty key should fail" >&2
+    exit 1
+  fi
+  if grep -q 'agent update' "$log"; then
+    echo "empty key wrote agents: $(cat "$log")" >&2
+    exit 1
+  fi
+) && ok "empty cached key fails and does not update agents" || fail "empty cached key fails and does not update agents"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  log="$tmp/stub.log"
+  : >"$log"
+  rc=0
+  out=$(MULTICA_STUB_FAIL_UPDATE=1 cli "$tmp" "$log" --yes --env --model nvidia/foo:free --runtime opencode --workspace ws-a --agent AgentOne 2>&1) || rc=$?
+  [[ "$rc" -ne 0 ]] || { echo "failed update should fail the CLI: $out" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'FAIL' || { echo "no FAIL in output: $out" >&2; exit 1; }
+  if grep -q 'ENVFILE' "$log"; then
+    echo "env set after failed update: $(cat "$log")" >&2
+    exit 1
+  fi
+) && ok "failed agent update is reported and skips env set" || fail "failed agent update is reported and skips env set"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  log="$tmp/stub.log"
+  : >"$log"
+  out=$(cli "$tmp" "$log" --dry-run --model nvidia/foo:free --runtime omp --machine omarchy-4090 --workspace ws-a --workspace ws-b)
+  printf '%s' "$out" | grep -q 'SKIP' || { echo "$out" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'AgentB' || { echo "$out" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'openrouter/nvidia/foo:free' || { echo "$out" >&2; exit 1; }
+  if grep -q 'agent update' "$log"; then
+    echo "dry-run updated: $(cat "$log")" >&2
+    exit 1
+  fi
+) && ok "workspace missing harness is SKIP, others still listed" || fail "workspace missing harness is SKIP, others still listed"
+
+(
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  err=$(cli "$tmp" "" --yes --no-env --model nvidia/foo:free --runtime hermes 2>&1 || true)
+  printf '%s' "$err" | grep -qi 'no online' || { echo "err=$err" >&2; exit 1; }
+  printf '%s' "$err" | grep -q 'more than one' && { echo "wrong error: $err" >&2; exit 1; }
+  true
+) && ok "zero matching machines says none online, not more than one" || fail "zero matching machines says none online, not more than one"
 
 echo
 echo "$PASS passed, $FAIL failed"

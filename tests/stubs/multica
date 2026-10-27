@@ -75,6 +75,15 @@ if [[ "$cmd" == "runtime" && "$sub" == "list" ]]; then
     "status":"offline",
     "runtime_mode":"local",
     "workspace_id":"$WS_A"
+  },
+  {
+    "id":"11111111-cccc-cccc-cccc-cccccccccccc",
+    "provider":"omp",
+    "name":"Oh-My-Pi (omarchy-4090)",
+    "device_info":"omarchy-4090 · 1.0",
+    "status":"online",
+    "runtime_mode":"local",
+    "workspace_id":"$WS_A"
   }
 ]
 EOF
@@ -91,6 +100,15 @@ EOF
     "status":"online",
     "runtime_mode":"local",
     "workspace_id":"$WS_B"
+  },
+  {
+    "id":"22222222-cccc-cccc-cccc-cccccccccccc",
+    "provider":"claude",
+    "name":"Claude Cloud",
+    "device_info":"cloud · 1.0",
+    "status":"online",
+    "runtime_mode":"cloud",
+    "workspace_id":"$WS_B"
   }
 ]
 EOF
@@ -101,6 +119,22 @@ EOF
 fi
 
 if [[ "$cmd" == "agent" && "$sub" == "list" ]]; then
+  if [[ "$ws_id" == "$WS_B" ]]; then
+    cat <<EOF
+[
+  {
+    "id":"33333333-cccc-cccc-cccc-cccccccccccc",
+    "name":"AgentB",
+    "model":"something",
+    "runtime_id":"$RT_B_ON",
+    "system_key":null,
+    "workspace_id":"$WS_B",
+    "status":"idle"
+  }
+]
+EOF
+    exit 0
+  fi
   if [[ "$ws_id" == "$WS_A" ]]; then
     cat <<EOF
 [
@@ -131,6 +165,10 @@ EOF
 fi
 
 if [[ "$cmd" == "agent" && "$sub" == "update" ]]; then
+  if [[ "${MULTICA_STUB_FAIL_UPDATE:-}" == "1" ]]; then
+    echo "stub: agent update failed" >&2
+    exit 1
+  fi
   echo '{"ok":true}'
   exit 0
 fi

@@ -31,12 +31,14 @@ load_api_key() {
     printf '%s\n' "$OPENROUTER_API_KEY"
     return 0
   fi
-  local f
+  local f key=""
   f=$(key_path)
   if [[ -f "$f" ]]; then
-    tr -d '\r\n' <"$f"
-    printf '\n'
-    return 0
+    key=$(tr -d '\r\n' <"$f")
+    if [[ -n "$key" ]]; then
+      printf '%s\n' "$key"
+      return 0
+    fi
   fi
   if [[ "${MULTICA_FREE_AGENT_NONINTERACTIVE:-}" == "1" ]] || ! { printf '' >/dev/tty; } 2>/dev/null; then
     echo "No OpenRouter API key. Set OPENROUTER_API_KEY or run interactively to cache one at $(key_path)." >&2
@@ -55,7 +57,20 @@ load_api_key() {
 
 fetch_models_json() {
   local key=$1
-  curl -fsS -H "Authorization: Bearer ${key}" "$OPENROUTER_MODELS_URL"
+  local body err
+  body=$(mktemp)
+  err=$(mktemp)
+  if ! curl -fsS -H "Authorization: Bearer ${key}" "$OPENROUTER_MODELS_URL" -o "$body" 2>"$err"; then
+    if grep -Eq '401|403' "$err"; then
+      echo "OpenRouter API key invalid or expired." >&2
+    else
+      cat "$err" >&2
+    fi
+    rm -f "$body" "$err"
+    return 1
+  fi
+  cat "$body"
+  rm -f "$body" "$err"
 }
 
 free_models_json() {
@@ -98,12 +113,20 @@ list_runtime_groups() {
     acc=$(jq -c --argjson rts "$json" "
       . + [
         \$rts[]
-        | select(.status == \"online\")
+        | select(.status == \"online\" and ((.runtime_mode // \"local\") == \"local\"))
         | {provider, machine: ($(runtime_machine_jq))}
       ]
     " <<<"$acc")
   done < <(printf '%s' "$ws" | jq -r '.[].id')
-  jq -c 'unique_by(.provider, .machine) | sort_by(.provider, .machine) | map(. + {label: "\(.provider) @ \(.machine)"})' <<<"$acc"
+  jq -c '
+    unique_by(.provider, .machine)
+    | sort_by(
+        (if .provider == "opencode" or .provider == "omp" or .provider == "pi" or .provider == "hermes" then 0 else 1 end),
+        .provider,
+        .machine
+      )
+    | map(. + {label: "\(.provider) @ \(.machine)"})
+  ' <<<"$acc"
 }
 
 list_agents() {
@@ -126,7 +149,7 @@ resolve_runtime_id() {
   jq -r --arg p "$provider" --arg m "$machine" "
     [
       .[]
-      | select(.status == \"online\" and .provider == \$p)
+      | select(.status == \"online\" and ((.runtime_mode // \"local\") == \"local\") and .provider == \$p)
       | . as \$r
       | ($(runtime_machine_jq)) as \$machine
       | select(\$machine == \$m)
@@ -265,6 +288,22 @@ runtime_label_for() {
   "
 }
 
+runtime_labels_json() {
+  local ws acc='{}' wid json
+  ws=$(list_workspaces)
+  while IFS= read -r wid; do
+    [[ -n "$wid" ]] || continue
+    json=$(multica runtime list --workspace-id "$wid" --output json)
+    acc=$(jq -c --argjson rts "$json" "
+      . + (
+        [ \$rts[] | {key: .id, value: \"\(.provider) @ \($(runtime_machine_jq))\"} ]
+        | from_entries
+      )
+    " <<<"$acc")
+  done < <(printf '%s' "$ws" | jq -r '.[].id')
+  printf '%s\n' "$acc"
+}
+
 pick_index() {
   local n=$1
   local label=$2
@@ -315,21 +354,27 @@ merge_env_file() {
 
 apply_one() {
   local agent_id=$1 ws_id=$2 rid=$3 mapped=$4 write_env=$5 key=$6
-  multica agent update "$agent_id" \
+  local tmp=""
+  if ! multica agent update "$agent_id" \
     --workspace-id "$ws_id" \
     --runtime-id "$rid" \
     --model "$mapped" \
-    --output json >/dev/null
+    --output json >/dev/null; then
+    return 1
+  fi
   if [[ "$write_env" == "1" ]]; then
-    local tmp
     tmp=$(mktemp)
     merge_env_file "$agent_id" "$ws_id" "$key" "$tmp"
-    multica agent env set "$agent_id" \
+    if ! multica agent env set "$agent_id" \
       --workspace-id "$ws_id" \
       --custom-env-file "$tmp" \
-      --output json >/dev/null
+      --output json >/dev/null; then
+      rm -f "$tmp"
+      return 1
+    fi
     rm -f "$tmp"
   fi
+  return 0
 }
 
 main() {
@@ -398,11 +443,17 @@ main() {
 
   local models_json=""
   local key=""
-  if [[ -z "$model" ]] || [[ "${write_env:-1}" == "1" && $dry_run -eq 0 ]]; then
-    key=$(load_api_key) || true
+  local need_key=0
+  if [[ -z "$model" ]]; then
+    need_key=1
+  fi
+  if [[ $dry_run -eq 0 && ( -z "$write_env" || "$write_env" == "1" ) ]]; then
+    need_key=1
+  fi
+  if [[ $need_key -eq 1 ]]; then
+    key=$(load_api_key)
   fi
   if [[ -z "$model" ]]; then
-    [[ -n "$key" ]] || key=$(load_api_key)
     models_json=$(fetch_models_json "$key" | free_models_json)
     if tty_in; then
       local n i
@@ -438,9 +489,11 @@ main() {
     local ms count
     ms=$(printf '%s' "$groups" | jq -r --arg p "$runtime" '.[] | select(.provider == $p) | .machine')
     count=$(printf '%s\n' "$ms" | grep -c . || true)
-    if [[ "$count" -eq 1 ]]; then
+    if [[ "$count" -eq 0 ]]; then
+      die "No online local $runtime runtime."
+    elif [[ "$count" -eq 1 ]]; then
       machine=$ms
-    elif tty_in && [[ "$count" -gt 1 ]]; then
+    elif tty_in; then
       echo "Machines for $runtime:"
       printf '%s\n' "$ms" | nl -w2 -s') '
       local i
@@ -479,7 +532,9 @@ main() {
     local in_ws n spec
     in_ws=$(filter_agents "$all_ag" "$sel_ws")
     echo "Agents:"
-    printf '%s' "$in_ws" | jq -r '.[] | "\(.workspace_slug)\t\(.name)\t\(.model // "")\t\(if .system_key then "[mika]" else "" end)"' | nl -w2 -s') '
+    local labels
+    labels=$(runtime_labels_json)
+    printf '%s' "$in_ws" | jq -r --argjson L "$labels" '.[] | "\(.workspace_slug)\t\(.name)\t\($L[.runtime_id] // "unknown")\t\(.model // "")\t\(if .system_key then "[mika]" else "" end)"' | nl -w2 -s') '
     n=$(printf '%s' "$in_ws" | jq 'length')
     [[ "$n" -gt 0 ]] || die "No agents in the selected workspaces."
     spec=$(pick_multi "$n" "agents")
