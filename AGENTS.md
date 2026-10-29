@@ -20,7 +20,8 @@ bash tests/run
 ## Behavior invariants (tests assert these — change script and tests together)
 
 - Model id mapping (`map_model_id`): `opencode/…` ids pass through unchanged; `openrouter/free` → `openrouter/openrouter/free`; anything else gets the `openrouter/` prefix.
-- Harness filtering: only `status == "online"` and `runtime_mode == "local"`; machine name comes from `device_info` (text before `·`) with a parenthesized-name fallback; cloud runtimes (e.g. `claude`) must never leak; OpenRouter-capable providers (`opencode omp pi hermes`) sort first.
+- Harness filtering: only `status == "online"` and `runtime_mode == "local"` and provider is OpenRouter-capable (`opencode omp pi hermes`); the real daemon reports desktop-launched `claude`/`codex`/etc. as `runtime_mode: "local"`, so the provider check is what keeps them out of every harness list; machine name comes from `device_info` (text before `·`) with a parenthesized-name fallback; cloud runtimes (e.g. `claude`) must never leak.
+- Harness menu is model-aware (`capable_groups`): an `opencode/…` (Zen) model narrows the menu to opencode runtimes only (die with "pick an OpenRouter model instead" if none is online); any other free model lists all OpenRouter-capable harnesses. This prevents picking a harness that cannot run the model the user just chose.
 - Runtime ids are per-workspace: always resolve with the agent's own workspace id (`resolve_runtime_id ws_id provider machine`).
 - `OPENROUTER_API_KEY` is merged into `custom_env` via a `0600` temp file (`multica agent env set --custom-env-file`), never on the command line; the outgoing JSON masks existing `custom_env` values as `****`; env set only happens after a successful `agent update`.
 - `--yes`/`--dry-run` without `--model` and `--runtime` fail on a non-tty. `opencode/…` (Zen) ids need no key and force `--no-env`.
@@ -29,7 +30,7 @@ bash tests/run
 ## Places that must stay in sync
 
 - Flags appear in three spots: the `usage()` heredoc, the arg parser in `main`, and the README flag table — update all.
-- The OpenRouter-capable provider list is written three times: `OR_CAPABLE` (top of script), the jq sort in `list_runtime_groups`, and the warning text in `main`.
+- The OpenRouter-capable provider list is written three times: `OR_CAPABLE` (top of script), the jq provider filter in `list_runtime_groups`, and the warning text in `main`.
 
 ## Live runs
 

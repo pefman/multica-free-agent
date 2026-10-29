@@ -118,7 +118,8 @@ with_stub() {
   [[ "$labels" == *"opencode @ omarchy-4090"* ]] || { echo "labels=$labels" >&2; exit 1; }
   [[ "$labels" == *"omp @ omarchy-4090"* ]] || { echo "labels=$labels" >&2; exit 1; }
   [[ "$labels" != *"pef-4090"* ]] || { echo "offline leaked: $labels" >&2; exit 1; }
-  [[ "$labels" != *"claude"* ]] || { echo "cloud leaked: $labels" >&2; exit 1; }
+  [[ "$labels" != *"claude"* ]] || { echo "claude leaked: $labels" >&2; exit 1; }
+  [[ "$labels" != *"codex"* ]] || { echo "codex leaked: $labels" >&2; exit 1; }
   # two online opencode runtimes share provider @ machine: both must appear,
   # with the device detail in the label
   duplabels=$(printf '%s' "$groups" | jq -r '.[].label' | sort | tr '\n' '|')
@@ -126,7 +127,17 @@ with_stub() {
   [[ "$duplabels" == *"opencode @ omarchy-4090 (1.0)"* ]] || { echo "duplabels=$duplabels" >&2; exit 1; }
   first=$(printf '%s' "$groups" | jq -r '.[0].provider')
   [[ "$first" == "omp" || "$first" == "opencode" || "$first" == "pi" || "$first" == "hermes" ]] || { echo "first=$first" >&2; exit 1; }
-) && ok "list_runtime_groups keeps only online local harnesses, OR-capable first" || fail "list_runtime_groups keeps only online local harnesses, OR-capable first"
+) && ok "list_runtime_groups keeps only OpenRouter-capable online local harnesses" || fail "list_runtime_groups keeps only OpenRouter-capable online local harnesses"
+
+(
+  with_stub
+  groups=$(list_runtime_groups)
+  cap=$(capable_groups "$groups" "opencode/glm-5.3-flash-free")
+  [[ "$(printf '%s' "$cap" | jq -r '[.[].provider] | unique | join(",")')" == "opencode" ]] || {
+    echo "cap=$cap" >&2; exit 1; }
+  cap2=$(capable_groups "$groups" "openrouter/nvidia/foo:free")
+  [[ "$cap2" == "$groups" ]] || { echo "cap2=$cap2" >&2; exit 1; }
+) && ok "capable_groups narrows opencode models to opencode harnesses" || fail "capable_groups narrows opencode models to opencode harnesses"
 
 (
   with_stub

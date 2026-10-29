@@ -77,6 +77,24 @@ if [[ "$cmd" == "runtime" && "$sub" == "list" ]]; then
     "workspace_id":"$WS_A"
   },
   {
+    "id":"55555555-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "provider":"claude",
+    "name":"Claude Code (omarchy-4090)",
+    "device_info":"omarchy-4090 · 2.1.308 (Claude Code)",
+    "status":"online",
+    "runtime_mode":"local",
+    "workspace_id":"$WS_A"
+  },
+  {
+    "id":"55555555-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "provider":"codex",
+    "name":"Codex (omarchy-4090)",
+    "device_info":"omarchy-4090 · codex-cli 0.163.0",
+    "status":"online",
+    "runtime_mode":"local",
+    "workspace_id":"$WS_A"
+  },
+  {
     "id":"44444444-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
     "provider":"opencode",
     "name":"opencode v1 (omarchy-4090)",

@@ -114,6 +114,7 @@ list_runtime_groups() {
       . + [
         \$rts[]
         | select(.status == \"online\" and ((.runtime_mode // \"local\") == \"local\"))
+        | select(.provider == \"opencode\" or .provider == \"omp\" or .provider == \"pi\" or .provider == \"hermes\")
         | {provider, machine: ($(runtime_machine_jq)),
            device: (.device_info // .name // \"\"),
            detail: ((.device_info // .name // \"\") | (if (. | contains(\" · \")) then (split(\" · \")[1]) else . end))}
@@ -122,12 +123,7 @@ list_runtime_groups() {
   done < <(printf '%s' "$ws" | jq -r '.[].id')
   jq -c '
     unique_by(.provider, .machine, .device)
-    | sort_by(
-        (if .provider == "opencode" or .provider == "omp" or .provider == "pi" or .provider == "hermes" then 0 else 1 end),
-        .provider,
-        .machine,
-        .detail
-      )
+    | sort_by(.provider, .machine, .detail)
     | . as $rows
     | ($rows
        | group_by((.provider + ";" + .machine))
@@ -137,6 +133,18 @@ list_runtime_groups() {
     | map(. + {label: "\(.provider) @ \(.machine)"
                + (if ($dup[(.provider + ";" + .machine)] // false) then " (\(.detail))" else "" end)})
   ' <<<"$acc"
+}
+
+# Harnesses that can actually run a chosen model id: OpenCode catalog ids
+# (opencode/…) only run on opencode; everything else is an OpenRouter id and
+# runs on any OpenRouter-capable harness (opencode/omp/pi/hermes).
+capable_groups() {
+  local groups=$1 model=$2
+  if [[ "$model" == opencode/* ]]; then
+    printf '%s' "$groups" | jq -c '[.[] | select(.provider == "opencode")]'
+  else
+    printf '%s\n' "$groups"
+  fi
 }
 
 
@@ -887,23 +895,26 @@ main() {
   groups=$(list_runtime_groups)
   if [[ -z "$runtime" ]]; then
     if tty_in; then
+      local capable
+      capable=$(capable_groups "$groups" "$model")
       local n i p
-      n=$(printf '%s' "$groups" | jq 'length')
-      [[ "$n" -gt 0 ]] || die "No online local runtimes."
+      n=$(printf '%s' "$capable" | jq 'length')
+      [[ "$n" -gt 0 ]] || die "No online harness runs $model; pick an OpenRouter model instead."
       section "Online local harnesses (${n})"
       local glabels=() gl
       while IFS= read -r gl; do
         [[ -n "$gl" ]] || continue
         glabels+=("$gl")
-      done < <(printf '%s' "$groups" | jq -r '.[] | .label')
+      done < <(printf '%s' "$capable" | jq -r '.[] | .label')
       local gi
       for gi in "${!glabels[@]}"; do
         printf '  %2d) %s\n' $((gi + 1)) "${glabels[gi]}"
       done
       i=$(pick_index "$n" "harness")
-      runtime=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].provider')
-      machine=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].machine')
-      device=$(printf '%s' "$groups" | jq -r --argjson i "$i" '.[$i-1].device')
+      runtime=$(printf '%s' "$capable" | jq -r --argjson i "$i" '.[$i-1].provider')
+      machine=$(printf '%s' "$capable" | jq -r --argjson i "$i" '.[$i-1].machine')
+      device=$(printf '%s' "$capable" | jq -r --argjson i "$i" '.[$i-1].device')
+      groups=$capable
     else
       die "--runtime is required in non-interactive mode"
     fi
